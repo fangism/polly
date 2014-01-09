@@ -56,7 +56,6 @@
 #include "llvm/Analysis/RegionIterator.h"
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
-#include "llvm/Assembly/Writer.h"
 #include "llvm/DebugInfo.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/DiagnosticInfo.h"
@@ -714,12 +713,12 @@ void ScopDetection::printLocations(llvm::Function &F) {
 
 bool ScopDetection::runOnFunction(llvm::Function &F) {
   LI = &getAnalysis<LoopInfo>();
+  RI = &getAnalysis<RegionInfo>();
   if (!DetectScopsWithoutLoops && LI->empty())
     return false;
 
   AA = &getAnalysis<AliasAnalysis>();
   SE = &getAnalysis<ScalarEvolution>();
-  RI = &getAnalysis<RegionInfo>();
   Region *TopRegion = RI->getTopLevelRegion();
 
   releaseMemory();

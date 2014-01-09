@@ -66,6 +66,7 @@ add_polly_loadable_module(LLVMPolly
   Support/ScopHelper.cpp
   Exchange/JSONExporter.cpp
   ${POLLY_OPENSCOP_FILES}
+  Canonicalization.cpp
   CodePreparation.cpp
   DeadCodeElimination.cpp
   IndependentBlocks.cpp
