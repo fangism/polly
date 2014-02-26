@@ -123,7 +123,7 @@ ExportJScop("polly-export",
 
 static cl::opt<bool> DeadCodeElim("polly-run-dce",
                                   cl::desc("Run the dead code elimination"),
-                                  cl::Hidden, cl::init(false), cl::ZeroOrMore,
+                                  cl::Hidden, cl::init(true), cl::ZeroOrMore,
                                   cl::cat(PollyCategory));
 
 static cl::opt<bool>
@@ -289,7 +289,7 @@ static void registerPollyPasses(llvm::PassManagerBase &PM) {
     PM.add(llvm::createCFGPrinterPass());
 }
 
-static bool shouldEnablePolly(unsigned OptLevel) {
+static bool shouldEnablePolly() {
   if (PollyOnlyPrinter || PollyPrinter || PollyOnlyViewer || PollyViewer)
     PollyTrackFailures = true;
 
@@ -304,18 +304,8 @@ static void
 registerPollyEarlyAsPossiblePasses(const llvm::PassManagerBuilder &Builder,
                                    llvm::PassManagerBase &PM) {
 
-  if (!shouldEnablePolly(Builder.OptLevel))
+  if (!shouldEnablePolly())
     return;
-
-  // We only run Polly at optimization level '-O3'.
-  //
-  // This is to ensure that scalar overhead that may be introduced by Polly is
-  // properly cleaned up by LLVM later on. We may reinvestigate this decision
-  // later on.
-  if (Builder.OptLevel != 3) {
-    errs() << "Polly should only be run with -O3. Disabling Polly.\n";
-    return;
-  }
 
   registerPollyPasses(PM);
 }

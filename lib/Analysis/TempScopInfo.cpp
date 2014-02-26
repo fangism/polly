@@ -66,10 +66,7 @@ inline raw_ostream &operator<<(raw_ostream &OS, const BBCond &Cond) {
 
 //===----------------------------------------------------------------------===//
 // TempScop implementation
-TempScop::~TempScop() {
-  if (MayASInfo)
-    delete MayASInfo;
-}
+TempScop::~TempScop() {}
 
 void TempScop::print(raw_ostream &OS, ScalarEvolution *SE, LoopInfo *LI) const {
   OS << "Scop: " << R.getNameStr() << ", Max Loop Depth: " << MaxLoopDepth
@@ -141,7 +138,7 @@ bool TempScopInfo::buildScalarDependences(Instruction *Inst, Region *R) {
     assert(!isa<PHINode>(U) && "Non synthesizable PHINode found in a SCoP!");
 
     // Use the def instruction as base address of the IRAccess, so that it will
-    // become the the name of the scalar access in the polyhedral form.
+    // become the name of the scalar access in the polyhedral form.
     IRAccess ScalarAccess(IRAccess::SCALARREAD, Inst, ZeroOffset, 1, true);
     AccFuncMap[UseParent].push_back(std::make_pair(ScalarAccess, U));
   }
@@ -318,8 +315,6 @@ TempScop *TempScopInfo::buildTempScop(Region &R) {
 
   buildLoopBounds(*TScop);
 
-  // Build the MayAliasSets.
-  TScop->MayASInfo->buildMayAliasSets(*TScop, *AA);
   return TScop;
 }
 
@@ -342,10 +337,12 @@ bool TempScopInfo::runOnFunction(Function &F) {
   LI = &getAnalysis<LoopInfo>();
   SD = &getAnalysis<ScopDetection>();
   AA = &getAnalysis<AliasAnalysis>();
-  TD = &getAnalysis<DataLayout>();
+  TD = &getAnalysis<DataLayoutPass>().getDataLayout();
   ZeroOffset = SE->getConstant(TD->getIntPtrType(F.getContext()), 0);
 
   for (ScopDetection::iterator I = SD->begin(), E = SD->end(); I != E; ++I) {
+    if (!SD->isMaxRegionInScop(**I))
+      continue;
     Region *R = const_cast<Region *>(*I);
     TempScops.insert(std::make_pair(R, buildTempScop(*R)));
   }
@@ -354,7 +351,7 @@ bool TempScopInfo::runOnFunction(Function &F) {
 }
 
 void TempScopInfo::getAnalysisUsage(AnalysisUsage &AU) const {
-  AU.addRequired<DataLayout>();
+  AU.addRequired<DataLayoutPass>();
   AU.addRequiredTransitive<DominatorTreeWrapperPass>();
   AU.addRequiredTransitive<PostDominatorTree>();
   AU.addRequiredTransitive<LoopInfo>();
@@ -390,7 +387,7 @@ INITIALIZE_PASS_DEPENDENCY(LoopInfo);
 INITIALIZE_PASS_DEPENDENCY(PostDominatorTree);
 INITIALIZE_PASS_DEPENDENCY(RegionInfo);
 INITIALIZE_PASS_DEPENDENCY(ScalarEvolution);
-INITIALIZE_PASS_DEPENDENCY(DataLayout);
+INITIALIZE_PASS_DEPENDENCY(DataLayoutPass);
 INITIALIZE_PASS_END(TempScopInfo, "polly-analyze-ir",
                     "Polly - Analyse the LLVM-IR in the detected regions",
                     false, false)

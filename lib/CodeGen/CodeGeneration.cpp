@@ -115,6 +115,27 @@ Value *ClastExpCodeGen::codegen(const clast_name *e, Type *Ty) {
   return Builder.CreateSExtOrBitCast(I->second, Ty);
 }
 
+static APInt APInt_from_MPZ(const mpz_t mpz) {
+  uint64_t *p = NULL;
+  size_t sz;
+
+  p = (uint64_t *)mpz_export(p, &sz, -1, sizeof(uint64_t), 0, 0, mpz);
+
+  if (p) {
+    APInt A((unsigned)mpz_sizeinbase(mpz, 2), (unsigned)sz, p);
+    A = A.zext(A.getBitWidth() + 1);
+    free(p);
+
+    if (mpz_sgn(mpz) == -1)
+      return -A;
+    else
+      return A;
+  } else {
+    uint64_t val = 0;
+    return APInt(1, 1, &val);
+  }
+}
+
 Value *ClastExpCodeGen::codegen(const clast_term *e, Type *Ty) {
   APInt a = APInt_from_MPZ(e->val);
 
@@ -359,7 +380,8 @@ public:
 }
 
 IntegerType *ClastStmtCodeGen::getIntPtrTy() {
-  return P->getAnalysis<DataLayout>().getIntPtrType(Builder.getContext());
+  return P->getAnalysis<DataLayoutPass>().getDataLayout().getIntPtrType(
+      Builder.getContext());
 }
 
 const std::vector<std::string> &ClastStmtCodeGen::getParallelLoops() {
@@ -801,7 +823,7 @@ int ClastStmtCodeGen::getNumberOfIterations(const clast_for *For) {
   int NumberOfIterations = polly::getNumberOfIterations(LoopDomain);
   if (NumberOfIterations == -1)
     return -1;
-  return NumberOfIterations / isl_int_get_si(For->stride) + 1;
+  return NumberOfIterations / mpz_get_si(For->stride) + 1;
 }
 
 void ClastStmtCodeGen::codegenForVector(const clast_for *F) {
@@ -1033,7 +1055,7 @@ public:
     AU.addRequired<ScalarEvolution>();
     AU.addRequired<ScopDetection>();
     AU.addRequired<ScopInfo>();
-    AU.addRequired<DataLayout>();
+    AU.addRequired<DataLayoutPass>();
     AU.addRequired<LoopInfo>();
 
     AU.addPreserved<CloogInfo>();
@@ -1065,7 +1087,7 @@ INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass);
 INITIALIZE_PASS_DEPENDENCY(RegionInfo);
 INITIALIZE_PASS_DEPENDENCY(ScalarEvolution);
 INITIALIZE_PASS_DEPENDENCY(ScopDetection);
-INITIALIZE_PASS_DEPENDENCY(DataLayout);
+INITIALIZE_PASS_DEPENDENCY(DataLayoutPass);
 INITIALIZE_PASS_END(CodeGeneration, "polly-codegen",
                     "Polly - Create LLVM-IR from SCoPs", false, false)
 
