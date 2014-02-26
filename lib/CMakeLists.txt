@@ -49,7 +49,6 @@ endif (SCOPLIB_FOUND)
 
 add_polly_loadable_module(LLVMPolly
   Analysis/Dependences.cpp
-  Analysis/MayAliasSet.cpp
   Analysis/ScopDetection.cpp
   Analysis/ScopInfo.cpp
   Analysis/ScopGraphPrinter.cpp
