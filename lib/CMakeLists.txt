@@ -1,22 +1,17 @@
-# patch: flattened sub-components of Polly into monolithic link
-# to avoid intra-module circular dependencies
-# because cmake shared-lib build of convenience libraries is broken.
-add_subdirectory(JSON)
+# build a monolithic libLLVMPollyLib.$shlibext
+# and a thin module LLVMPolly.moduleext that links to that shared library
 
-set(MODULE TRUE)
 set(LLVM_NO_RTTI 1)
 
 if (PLUTO_FOUND)
   set(POLLY_PLUTO_FILES Pluto.cpp)
 endif (PLUTO_FOUND)
 
-set(LLVM_USED_LIBS
-#  LLVMPollyAnalysis
-#  LLVMPollyCodeGen
-#  LLVMPollyExchange
-#  LLVMPollySupport
-  LLVMPollyJSON
-  )
+set(POLLY_JSON_FILES
+    JSON/json_reader.cpp
+    JSON/json_value.cpp
+    JSON/json_writer.cpp
+)
 
 if (CLOOG_FOUND)
   set(CLOOG_FILES
@@ -47,7 +42,7 @@ if (SCOPLIB_FOUND)
       Exchange/ScopLibImporter.cpp)
 endif (SCOPLIB_FOUND)
 
-add_polly_loadable_module(LLVMPolly
+add_polly_library(LLVMPollyLib
   Analysis/Dependences.cpp
   Analysis/ScopDetection.cpp
   Analysis/ScopInfo.cpp
@@ -64,6 +59,7 @@ add_polly_loadable_module(LLVMPolly
   Support/SCEVValidator.cpp
   Support/ScopHelper.cpp
   Exchange/JSONExporter.cpp
+  ${POLLY_JSON_FILES}
   ${POLLY_OPENSCOP_FILES}
   Canonicalization.cpp
   CodePreparation.cpp
@@ -77,18 +73,21 @@ add_polly_loadable_module(LLVMPolly
   ${POLLY_PLUTO_FILES}
   )
 
+target_link_libraries(LLVMPollyLib
+  LLVMSupport
+  LLVMScalarOpts
+  LLVMTransformUtils
+  LLVMipo
+)
+
+add_polly_loadable_module(LLVMPolly)
+
 if (TARGET intrinsics_gen)
   # Check if we are building as part of an LLVM build
   add_dependencies(LLVMPolly intrinsics_gen)
 endif()
 
-add_dependencies(LLVMPolly
-#  LLVMPollyAnalysis
-#  LLVMPollyCodeGen
-#  LLVMPollyExchange
-#  LLVMPollySupport
-  LLVMPollyJSON
-  )
+target_link_libraries(LLVMPolly LLVMPollyLib)
 
 set_target_properties(LLVMPolly
   PROPERTIES
@@ -99,7 +98,3 @@ if (PLUTO_FOUND)
   target_link_libraries(LLVMPolly ${PLUTO_LIBRARY})
 endif(PLUTO_FOUND)
 
-target_link_libraries(LLVMPolly
-  LLVMSupport
-  LLVMTransformUtils
-)
