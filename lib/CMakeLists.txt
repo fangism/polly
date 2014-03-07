@@ -100,4 +100,3 @@ set_target_properties(LLVMPolly
 if (PLUTO_FOUND)
   target_link_libraries(LLVMPolly ${PLUTO_LIBRARY})
 endif(PLUTO_FOUND)
-
