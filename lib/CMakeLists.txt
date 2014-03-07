@@ -53,6 +53,7 @@ add_polly_library(LLVMPollyLib
   ${CLOOG_FILES}
   ${ISL_CODEGEN_FILES}
   CodeGen/LoopGenerators.cpp
+  CodeGen/IRBuilder.cpp
   CodeGen/Utils.cpp
   ${GPGPU_CODEGEN_FILES}
   Support/GICHelper.cpp
@@ -80,7 +81,9 @@ target_link_libraries(LLVMPollyLib
   LLVMipo
 )
 
-add_polly_loadable_module(LLVMPolly)
+add_polly_loadable_module(LLVMPolly
+  PollyModule.cpp
+)
 
 if (TARGET intrinsics_gen)
   # Check if we are building as part of an LLVM build
