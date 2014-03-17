@@ -74,12 +74,15 @@ add_polly_library(LLVMPollyLib
   ${POLLY_PLUTO_FILES}
   )
 
+if (APPLE)
+# apparently, this is not wanted on linux
 target_link_libraries(LLVMPollyLib
   LLVMSupport
   LLVMScalarOpts
   LLVMTransformUtils
   LLVMipo
 )
+endif()
 
 add_polly_loadable_module(LLVMPolly
   PollyModule.cpp
