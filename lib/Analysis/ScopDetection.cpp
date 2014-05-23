@@ -82,8 +82,9 @@ DetectRegionsWithoutLoops("polly-detect-scops-in-regions-without-loops",
                           cl::cat(PollyCategory));
 
 static cl::opt<std::string>
-OnlyFunction("polly-only-func", cl::desc("Only run on a single function"),
-             cl::value_desc("function-name"), cl::ValueRequired, cl::init(""),
+OnlyFunction("polly-only-func",
+             cl::desc("Only run on functions that contain a certain string"),
+             cl::value_desc("string"), cl::ValueRequired, cl::init(""),
              cl::cat(PollyCategory));
 
 static cl::opt<std::string>
@@ -336,6 +337,43 @@ bool ScopDetection::isInvariant(const Value &Val, const Region &Reg) const {
   return true;
 }
 
+bool ScopDetection::hasAffineMemoryAccesses(DetectionContext &Context) const {
+  for (auto P : Context.NonAffineAccesses) {
+    const SCEVUnknown *BasePointer = P.first;
+    Value *BaseValue = BasePointer->getValue();
+
+    // First step: collect parametric terms in all array references.
+    SmallVector<const SCEV *, 4> Terms;
+    for (const SCEVAddRecExpr *AF : Context.NonAffineAccesses[BasePointer])
+      AF->collectParametricTerms(*SE, Terms);
+
+    // Also collect terms from the affine memory accesses.
+    for (const SCEVAddRecExpr *AF : Context.AffineAccesses[BasePointer])
+      AF->collectParametricTerms(*SE, Terms);
+
+    // Second step: find array shape.
+    SmallVector<const SCEV *, 4> Sizes;
+    SE->findArrayDimensions(Terms, Sizes);
+
+    // Third step: compute the access functions for each subscript.
+    for (const SCEVAddRecExpr *AF : Context.NonAffineAccesses[BasePointer]) {
+      if (Sizes.empty())
+        return invalid<ReportNonAffineAccess>(Context, /*Assert=*/true, AF);
+
+      SmallVector<const SCEV *, 4> Subscripts;
+      if (!AF->computeAccessFunctions(*SE, Subscripts, Sizes) ||
+          Sizes.empty() || Subscripts.empty())
+        return invalid<ReportNonAffineAccess>(Context, /*Assert=*/true, AF);
+
+      // Check that the delinearized subscripts are affine.
+      for (const SCEV *S : Subscripts)
+        if (!isAffineExpr(&Context.CurRegion, S, *SE, BaseValue))
+          return invalid<ReportNonAffineAccess>(Context, /*Assert=*/true, AF);
+    }
+  }
+  return true;
+}
+
 bool ScopDetection::isValidMemoryAccess(Instruction &Inst,
                                         DetectionContext &Context) const {
   Value *Ptr = getPointerOperand(Inst);
@@ -369,21 +407,22 @@ bool ScopDetection::isValidMemoryAccess(Instruction &Inst,
   } else if (!isAffineExpr(&Context.CurRegion, AccessFunction, *SE,
                            BaseValue)) {
     const SCEVAddRecExpr *AF = dyn_cast<SCEVAddRecExpr>(AccessFunction);
+
     if (!PollyDelinearize || !AF)
       return invalid<ReportNonAffineAccess>(Context, /*Assert=*/true,
                                             AccessFunction);
 
-    // Try to delinearize AccessFunction only when the expression is known to
-    // not be affine: as all affine functions can be represented without
-    // problems in Polly, we do not have to delinearize them.
-    SmallVector<const SCEV *, 4> Subscripts, Sizes;
-    AF->delinearize(*SE, Subscripts, Sizes);
-    int size = Subscripts.size();
-
-    for (int i = 0; i < size; ++i)
-      if (!isAffineExpr(&Context.CurRegion, Subscripts[i], *SE, BaseValue))
-        return invalid<ReportNonAffineAccess>(Context, /*Assert=*/true,
-                                              AccessFunction);
+    // Collect all non affine memory accesses, and check whether they are linear
+    // at the end of scop detection. That way we can delinearize all the memory
+    // accesses to the same array in a unique step.
+    if (Context.NonAffineAccesses[BasePointer].size() == 0)
+      Context.NonAffineAccesses[BasePointer] = AFs();
+    Context.NonAffineAccesses[BasePointer].push_back(AF);
+  } else if (const SCEVAddRecExpr *AF =
+                 dyn_cast<SCEVAddRecExpr>(AccessFunction)) {
+    if (Context.AffineAccesses[BasePointer].size() == 0)
+      Context.AffineAccesses[BasePointer] = AFs();
+    Context.AffineAccesses[BasePointer].push_back(AF);
   }
 
   // FIXME: Alias Analysis thinks IntToPtrInst aliases with alloca instructions
@@ -608,6 +647,9 @@ bool ScopDetection::allBlocksValid(DetectionContext &Context) const {
       if (!isValidInstruction(*I, Context))
         return false;
 
+  if (!hasAffineMemoryAccesses(Context))
+    return false;
+
   return true;
 }
 
@@ -730,7 +772,7 @@ bool ScopDetection::runOnFunction(llvm::Function &F) {
 
   releaseMemory();
 
-  if (OnlyFunction != "" && F.getName() != OnlyFunction)
+  if (OnlyFunction != "" && !F.getName().count(OnlyFunction))
     return false;
 
   if (!isValidFunction(F))
