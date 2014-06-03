@@ -50,6 +50,8 @@
 #include "llvm/Pass.h"
 #include "llvm/Analysis/AliasSetTracker.h"
 
+#include "polly/ScopDetectionDiagnostic.h"
+
 #include <set>
 #include <map>
 
@@ -73,8 +75,35 @@ class Value;
 namespace polly {
 typedef std::set<const SCEV *> ParamSetType;
 
-typedef std::vector<const SCEVAddRecExpr *> AFs;
+// Description of the shape of an array.
+struct ArrayShape {
+  // Base pointer identifying all accesses to this array.
+  const SCEVUnknown *BasePointer;
+
+  // Sizes of each delinearized dimension.
+  SmallVector<const SCEV *, 4> DelinearizedSizes;
+
+  ArrayShape(const SCEVUnknown *B) : BasePointer(B), DelinearizedSizes() {}
+};
+
+struct MemAcc {
+  const Instruction *Insn;
+
+  // A pointer to the shape description of the array.
+  ArrayShape *Shape;
+
+  // Subscripts computed by delinearization.
+  SmallVector<const SCEV *, 4> DelinearizedSubscripts;
+
+  MemAcc(const Instruction *I, ArrayShape *S)
+      : Insn(I), Shape(S), DelinearizedSubscripts() {}
+};
+
+typedef std::map<const Instruction *, MemAcc *> MapInsnToMemAcc;
+typedef std::pair<const Instruction *, const SCEVAddRecExpr *> PairInsnAddRec;
+typedef std::vector<PairInsnAddRec> AFs;
 typedef std::map<const SCEVUnknown *, AFs> BaseToAFs;
+typedef std::map<const SCEVUnknown *, const SCEV *> BaseToElSize;
 
 extern bool PollyTrackFailures;
 extern bool PollyDelinearize;
@@ -100,25 +129,26 @@ class ScopDetection : public FunctionPass {
     Region &CurRegion;   // The region to check.
     AliasSetTracker AST; // The AliasSetTracker to hold the alias information.
     bool Verifying;      // If we are in the verification phase?
+    RejectLog Log;
 
     // Map a base pointer to all access functions accessing it.
     BaseToAFs NonAffineAccesses, AffineAccesses;
+    BaseToElSize ElementSize;
 
     DetectionContext(Region &R, AliasAnalysis &AA, bool Verify)
-        : CurRegion(R), AST(AA), Verifying(Verify) {}
+        : CurRegion(R), AST(AA), Verifying(Verify), Log(&R) {}
   };
 
   // Remember the valid regions
   typedef std::set<const Region *> RegionSet;
   RegionSet ValidRegions;
 
-  // Invalid regions and the reason they fail.
-  std::map<const Region *, std::string> InvalidRegions;
+  // Remember a list of errors for every region.
+  mutable std::map<const Region *, RejectLog> RejectLogs;
 
   // Remember the invalid functions producted by backends;
   typedef std::set<const Function *> FunctionSet;
   FunctionSet InvalidFunctions;
-  mutable std::string LastFailure;
 
   // Delinearize all non affine memory accesses and return false when there
   // exists a non affine memory access that cannot be delinearized. Return true
@@ -287,6 +317,22 @@ public:
 
   const_iterator begin() const { return ValidRegions.begin(); }
   const_iterator end() const { return ValidRegions.end(); }
+  //@}
+
+  /// @name Reject log iterators
+  ///
+  /// These iterators iterate over the logs of all rejected regions of this
+  //  function.
+  //@{
+  typedef std::map<const Region *, RejectLog>::iterator reject_iterator;
+  typedef std::map<const Region *, RejectLog>::const_iterator
+  const_reject_iterator;
+
+  reject_iterator reject_begin() { return RejectLogs.begin(); }
+  reject_iterator reject_end() { return RejectLogs.end(); }
+
+  const_reject_iterator reject_begin() const { return RejectLogs.begin(); }
+  const_reject_iterator reject_end() const { return RejectLogs.end(); }
   //@}
 
   /// @brief Mark the function as invalid so we will not extract any scop from
