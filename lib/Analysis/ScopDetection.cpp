@@ -219,7 +219,14 @@ std::string ScopDetection::regionIsInvalidBecause(const Region *R) const {
   // Get the first error we found. Even in keep-going mode, this is the first
   // reason that caused the candidate to be rejected.
   RejectLog Errors = RejectLogs.at(R);
-  return (*Errors.begin())->getMessage();
+
+  // This can happen when we marked a region invalid, but didn't track
+  // an error for it.
+  if (Errors.size() == 0)
+    return "";
+
+  RejectReasonPtr RR = *Errors.begin();
+  return RR->getMessage();
 }
 
 bool ScopDetection::isValidCFG(BasicBlock &BB,
@@ -760,29 +767,6 @@ bool ScopDetection::isValidRegion(DetectionContext &Context) const {
 
 bool ScopDetection::isValidFunction(llvm::Function &F) {
   return !InvalidFunctions.count(&F);
-}
-
-void ScopDetection::getDebugLocation(const Region *R, unsigned &LineBegin,
-                                     unsigned &LineEnd, std::string &FileName) {
-  LineBegin = -1;
-  LineEnd = 0;
-
-  for (const BasicBlock *BB : R->blocks())
-    for (const Instruction &Inst : *BB) {
-      DebugLoc DL = Inst.getDebugLoc();
-      if (DL.isUnknown())
-        continue;
-
-      DIScope Scope(DL.getScope(Inst.getContext()));
-
-      if (FileName.empty())
-        FileName = Scope.getFilename();
-
-      unsigned NewLine = DL.getLine();
-
-      LineBegin = std::min(LineBegin, NewLine);
-      LineEnd = std::max(LineEnd, NewLine);
-    }
 }
 
 void ScopDetection::printLocations(llvm::Function &F) {
