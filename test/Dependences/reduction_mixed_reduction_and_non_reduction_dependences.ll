@@ -1,11 +1,15 @@
 ; RUN: opt %loadPolly -polly-dependences -analyze < %s | FileCheck %s
 ;
-; FIXME: This is only true as long as we restrict ourselfs to the exact same
-;        access pointer for the load and store.
-; The statement is "almost" reduction like but should not yield any reduction dependences
-;
-; CHECK:  Reduction dependences:
-; CHECK:    {  }
+; CHECK: RAW dependences:
+; CHECK-DAG: Stmt_for_body3[i0, 1] -> Stmt_for_body3[1 + i0, o1] : i0 <= 1022 and i0 >= 0 and o1 <= 511 and o1 >= 1
+; CHECK-DAG: Stmt_for_body3[i0, 0] -> Stmt_for_body3[i0, o1] : i0 <= 1023 and i0 >= 0 and o1 <= 511 and o1 >= 1
+; CHECK: WAR dependences:
+; CHECK:   {  }
+; CHECK: WAW dependences:
+; CHECK-DAG: Stmt_for_body3[i0, i1] -> Stmt_for_body3[1 + i0, -1 + i1] : i0 <= 1022 and i0 >= 0 and i1 <= 511 and i1 >= 2
+; CHECK-DAG: Stmt_for_body3[i0, 2] -> Stmt_for_body3[2 + i0, 0] : i0 <= 1021 and i0 >= 0
+; CHECK: Reduction dependences:
+; CHECK:   { Stmt_for_body3[i0, 1] -> Stmt_for_body3[1 + i0, 0] : i0 >= 0 and i0 <= 1022 }
 ;
 ; void f(int *sum) {
 ;   for (int i = 0; i < 1024; i++)

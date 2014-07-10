@@ -69,7 +69,6 @@ private:
   isl_ast_node *Root;
   isl_ast_expr *RunCondition;
 
-  __isl_give isl_union_map *getSchedule();
   void buildRunCondition(__isl_keep isl_ast_build *Context);
 };
 } // End namespace polly.
@@ -122,7 +121,6 @@ printFor(__isl_take isl_printer *Printer,
 static struct IslAstUser *allocateIslAstUser() {
   struct IslAstUser *NodeInfo;
   NodeInfo = (struct IslAstUser *)malloc(sizeof(struct IslAstUser));
-  NodeInfo->PMA = 0;
   NodeInfo->Context = 0;
   NodeInfo->IsOutermostParallel = 0;
   NodeInfo->IsInnermostParallel = 0;
@@ -133,7 +131,6 @@ static struct IslAstUser *allocateIslAstUser() {
 static void freeIslAstUser(void *Ptr) {
   struct IslAstUser *UserStruct = (struct IslAstUser *)Ptr;
   isl_ast_build_free(UserStruct->Context);
-  isl_pw_multi_aff_free(UserStruct->PMA);
   free(UserStruct);
 }
 
@@ -168,7 +165,8 @@ static bool astScheduleDimIsParallel(__isl_keep isl_ast_build *Build,
 
   // FIXME: We can remove ignore reduction dependences in case we privatize the
   //        memory locations the reduction statements reduce into.
-  Deps = D->getDependences(Dependences::TYPE_ALL | Dependences::TYPE_RED);
+  Deps = D->getDependences(Dependences::TYPE_RAW | Dependences::TYPE_WAW |
+                           Dependences::TYPE_WAR | Dependences::TYPE_RED);
   Deps = isl_union_map_apply_range(Deps, isl_union_map_copy(Schedule));
   Deps = isl_union_map_apply_domain(Deps, Schedule);
 
@@ -313,10 +311,6 @@ static __isl_give isl_ast_node *AtEachDomain(__isl_take isl_ast_node *Node,
     Id = isl_id_set_free_user(Id, &freeIslAstUser);
   }
 
-  if (!Info->PMA) {
-    isl_map *Map = isl_map_from_union_map(isl_ast_build_get_schedule(Context));
-    Info->PMA = isl_pw_multi_aff_from_map(isl_map_reverse(Map));
-  }
   if (!Info->Context)
     Info->Context = isl_ast_build_copy(Context);
 
@@ -347,7 +341,7 @@ void IslAst::buildRunCondition(__isl_keep isl_ast_build *Context) {
   PwZero = isl_pw_aff_intersect_domain(
       PwZero, isl_set_complement(S->getAssumedContext()));
 
-  isl_pw_aff *Cond = isl_pw_aff_union_max(PwZero, PwOne);
+  isl_pw_aff *Cond = isl_pw_aff_union_max(PwOne, PwZero);
 
   RunCondition = isl_ast_build_expr_from_pw_aff(Context, Cond);
 }
@@ -365,7 +359,8 @@ IslAst::IslAst(Scop *Scop, Dependences &D) : S(Scop) {
 
   Context = isl_ast_build_set_at_each_domain(Context, AtEachDomain, nullptr);
 
-  isl_union_map *Schedule = getSchedule();
+  isl_union_map *Schedule =
+      isl_union_map_intersect_domain(S->getSchedule(), S->getDomains());
 
   Function *F = Scop->getRegion().getEntry()->getParent();
   (void)F;
@@ -392,20 +387,6 @@ IslAst::IslAst(Scop *Scop, Dependences &D) : S(Scop) {
   isl_ast_build_free(Context);
 
   DEBUG(pprint(dbgs()));
-}
-
-__isl_give isl_union_map *IslAst::getSchedule() {
-  isl_union_map *Schedule = isl_union_map_empty(S->getParamSpace());
-
-  for (ScopStmt *Stmt : *S) {
-    isl_map *StmtSchedule = Stmt->getScattering();
-
-    StmtSchedule = isl_map_intersect_domain(StmtSchedule, Stmt->getDomain());
-    Schedule =
-        isl_union_map_union(Schedule, isl_union_map_from_map(StmtSchedule));
-  }
-
-  return Schedule;
 }
 
 IslAst::~IslAst() {

@@ -97,12 +97,11 @@ struct DOTGraphTraits<ScopDetection *> : public DOTGraphTraits<RegionNode *> {
   static std::string escapeString(std::string String) {
     std::string Escaped;
 
-    for (std::string::iterator SI = String.begin(), SE = String.end(); SI != SE;
-         ++SI) {
-      if (*SI == '"')
+    for (const auto &C : String) {
+      if (C == '"')
         Escaped += '\\';
 
-      Escaped += *SI;
+      Escaped += C;
     }
     return Escaped;
   }
@@ -188,15 +187,15 @@ static RegisterPass<ScopViewer> X("view-scops",
                                   "Polly - View Scops of function");
 
 static RegisterPass<ScopOnlyViewer>
-Y("view-scops-only",
-  "Polly - View Scops of function (with no function bodies)");
+    Y("view-scops-only",
+      "Polly - View Scops of function (with no function bodies)");
 
 static RegisterPass<ScopPrinter> M("dot-scops",
                                    "Polly - Print Scops of function");
 
 static RegisterPass<ScopOnlyPrinter>
-N("dot-scops-only",
-  "Polly - Print Scops of function (with no function bodies)");
+    N("dot-scops-only",
+      "Polly - Print Scops of function (with no function bodies)");
 
 Pass *polly::createDOTViewerPass() { return new ScopViewer(); }
 

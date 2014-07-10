@@ -58,11 +58,10 @@ STATISTIC(RichScopFound, "Number of Scops containing a loop");
 // Multiplicative reductions can be disabled seperately as these kind of
 // operations can overflow easily. Additive reductions and bit operations
 // are in contrast pretty stable.
-static cl::opt<bool>
-DisableMultiplicativeReductions("polly-disable-multiplicative-reductions",
-                                cl::desc("Disable multiplicative reductions"),
-                                cl::Hidden, cl::ZeroOrMore, cl::init(false),
-                                cl::cat(PollyCategory));
+static cl::opt<bool> DisableMultiplicativeReductions(
+    "polly-disable-multiplicative-reductions",
+    cl::desc("Disable multiplicative reductions"), cl::Hidden, cl::ZeroOrMore,
+    cl::init(false), cl::cat(PollyCategory));
 
 /// Translate a 'const SCEV *' expression in an isl_pw_aff.
 struct SCEVAffinator : public SCEVVisitor<SCEVAffinator, isl_pw_aff *> {
@@ -273,6 +272,36 @@ int SCEVAffinator::getLoopDepth(const Loop *L) {
   return L->getLoopDepth() - outerLoop->getLoopDepth();
 }
 
+/// @brief Return the reduction type for a given binary operator
+static MemoryAccess::ReductionType getReductionType(const BinaryOperator *BinOp,
+                                                    const Instruction *Load) {
+  if (!BinOp)
+    return MemoryAccess::RT_NONE;
+  switch (BinOp->getOpcode()) {
+  case Instruction::FAdd:
+    if (!BinOp->hasUnsafeAlgebra())
+      return MemoryAccess::RT_NONE;
+  // Fall through
+  case Instruction::Add:
+    return MemoryAccess::RT_ADD;
+  case Instruction::Or:
+    return MemoryAccess::RT_BOR;
+  case Instruction::Xor:
+    return MemoryAccess::RT_BXOR;
+  case Instruction::And:
+    return MemoryAccess::RT_BAND;
+  case Instruction::FMul:
+    if (!BinOp->hasUnsafeAlgebra())
+      return MemoryAccess::RT_NONE;
+  // Fall through
+  case Instruction::Mul:
+    if (DisableMultiplicativeReductions)
+      return MemoryAccess::RT_NONE;
+    return MemoryAccess::RT_MUL;
+  default:
+    return MemoryAccess::RT_NONE;
+  }
+}
 //===----------------------------------------------------------------------===//
 
 MemoryAccess::~MemoryAccess() {
@@ -312,6 +341,10 @@ std::string MemoryAccess::getAccessRelationStr() const {
   return stringFromIslObj(AccessRelation);
 }
 
+__isl_give isl_space *MemoryAccess::getAccessRelationSpace() const {
+  return isl_map_get_space(AccessRelation);
+}
+
 isl_map *MemoryAccess::getNewAccessRelation() const {
   return isl_map_copy(newAccessRelation);
 }
@@ -324,6 +357,66 @@ isl_basic_map *MemoryAccess::createBasicAccessMap(ScopStmt *Statement) {
   return isl_basic_map_from_domain_and_range(
       isl_basic_set_universe(Statement->getDomainSpace()),
       isl_basic_set_universe(Space));
+}
+
+// Formalize no out-of-bound access assumption
+//
+// When delinearizing array accesses we optimistically assume that the
+// delinearized accesses do not access out of bound locations (the subscript
+// expression of each array evaluates for each statement instance that is
+// executed to a value that is larger than zero and strictly smaller than the
+// size of the corresponding dimension). The only exception is the outermost
+// dimension for which we do not assume any upper bound.  At this point we
+// formalize this assumption to ensure that at code generation time the relevant
+// run-time checks can be generated.
+//
+// To find the set of constraints necessary to avoid out of bound accesses, we
+// first build the set of data locations that are not within array bounds. We
+// then apply the reverse access relation to obtain the set of iterations that
+// may contain invalid accesses and reduce this set of iterations to the ones
+// that are actually executed by intersecting them with the domain of the
+// statement. If we now project out all loop dimensions, we obtain a set of
+// parameters that may cause statement instances to be executed that may
+// possibly yield out of bound memory accesses. The complement of these
+// constraints is the set of constraints that needs to be assumed to ensure such
+// statement instances are never executed.
+void MemoryAccess::assumeNoOutOfBound(const IRAccess &Access) {
+  isl_space *Space = isl_space_range(getAccessRelationSpace());
+  isl_set *Outside = isl_set_empty(isl_space_copy(Space));
+  for (int i = 0, Size = Access.Subscripts.size(); i < Size; ++i) {
+    isl_local_space *LS = isl_local_space_from_space(isl_space_copy(Space));
+    isl_pw_aff *Var =
+        isl_pw_aff_var_on_domain(isl_local_space_copy(LS), isl_dim_set, i);
+    isl_pw_aff *Zero = isl_pw_aff_zero_on_domain(LS);
+
+    isl_set *DimOutside;
+
+    if (i == 0) {
+      DimOutside = isl_pw_aff_lt_set(Var, Zero);
+    } else {
+      DimOutside = isl_pw_aff_lt_set(isl_pw_aff_copy(Var), Zero);
+      isl_pw_aff *SizeE =
+          SCEVAffinator::getPwAff(Statement, Access.Sizes[i - 1]);
+
+      SizeE = isl_pw_aff_drop_dims(SizeE, isl_dim_in, 0,
+                                   Statement->getNumIterators());
+      SizeE = isl_pw_aff_add_dims(SizeE, isl_dim_in,
+                                  isl_space_dim(Space, isl_dim_set));
+      SizeE = isl_pw_aff_set_tuple_id(
+          SizeE, isl_dim_in, isl_space_get_tuple_id(Space, isl_dim_set));
+
+      DimOutside = isl_set_union(DimOutside, isl_pw_aff_le_set(SizeE, Var));
+    }
+
+    Outside = isl_set_union(Outside, DimOutside);
+  }
+
+  Outside = isl_set_apply(Outside, isl_map_reverse(getAccessRelation()));
+  Outside = isl_set_intersect(Outside, Statement->getDomain());
+  Outside = isl_set_params(Outside);
+  Outside = isl_set_complement(Outside);
+  Statement->getParent()->addAssumption(Outside);
+  isl_space_free(Space);
 }
 
 MemoryAccess::MemoryAccess(const IRAccess &Access, const Instruction *AccInst,
@@ -379,6 +472,7 @@ MemoryAccess::MemoryAccess(const IRAccess &Access, const Instruction *AccInst,
   isl_space_free(Space);
   AccessRelation = isl_map_set_tuple_name(AccessRelation, isl_dim_out,
                                           getBaseName().c_str());
+  assumeNoOutOfBound(Access);
 }
 
 void MemoryAccess::realignParams() {
@@ -396,19 +490,44 @@ MemoryAccess::MemoryAccess(const Value *BaseAddress, ScopStmt *Statement)
   AccessRelation = isl_map_align_params(AccessRelation, ParamSpace);
 }
 
-void MemoryAccess::print(raw_ostream &OS) const {
-  OS.indent(8) << "Reduction like: " << isReductionLike() << "\n";
-  switch (Type) {
-  case READ:
-    OS.indent(12) << "ReadAccess := \n";
+raw_ostream &polly::operator<<(raw_ostream &OS,
+                               MemoryAccess::ReductionType RT) {
+  switch (RT) {
+  case MemoryAccess::RT_NONE:
+    OS << "NONE";
     break;
-  case MUST_WRITE:
-    OS.indent(12) << "MustWriteAccess := \n";
+  case MemoryAccess::RT_ADD:
+    OS << "ADD";
     break;
-  case MAY_WRITE:
-    OS.indent(12) << "MayWriteAccess := \n";
+  case MemoryAccess::RT_MUL:
+    OS << "MUL";
+    break;
+  case MemoryAccess::RT_BOR:
+    OS << "BOR";
+    break;
+  case MemoryAccess::RT_BXOR:
+    OS << "BXOR";
+    break;
+  case MemoryAccess::RT_BAND:
+    OS << "BAND";
     break;
   }
+  return OS;
+}
+
+void MemoryAccess::print(raw_ostream &OS) const {
+  switch (Type) {
+  case READ:
+    OS.indent(12) << "ReadAccess :=\t";
+    break;
+  case MUST_WRITE:
+    OS.indent(12) << "MustWriteAccess :=\t";
+    break;
+  case MAY_WRITE:
+    OS.indent(12) << "MayWriteAccess :=\t";
+    break;
+  }
+  OS << "[Reduction Type: " << getReductionType() << "]\n";
   OS.indent(16) << getAccessRelationStr() << ";\n";
 }
 
@@ -556,22 +675,18 @@ void ScopStmt::buildScattering(SmallVectorImpl<unsigned> &Scatter) {
 }
 
 void ScopStmt::buildAccesses(TempScop &tempScop, const Region &CurRegion) {
-  const AccFuncSetType *AccFuncs = tempScop.getAccessFunctions(BB);
-
-  for (AccFuncSetType::const_iterator I = AccFuncs->begin(),
-                                      E = AccFuncs->end();
-       I != E; ++I) {
-    MemAccs.push_back(new MemoryAccess(I->first, I->second, this));
+  for (auto &&Access : *tempScop.getAccessFunctions(BB)) {
+    MemAccs.push_back(new MemoryAccess(Access.first, Access.second, this));
 
     // We do not track locations for scalar memory accesses at the moment.
     //
     // We do not have a use for this information at the moment. If we need this
     // at some point, the "instruction -> access" mapping needs to be enhanced
     // as a single instruction could then possibly perform multiple accesses.
-    if (!I->first.isScalar()) {
-      assert(!InstructionToAccess.count(I->second) &&
+    if (!Access.first.isScalar()) {
+      assert(!InstructionToAccess.count(Access.second) &&
              "Unexpected 1-to-N mapping on instruction to access map!");
-      InstructionToAccess[I->second] = MemAccs.back();
+      InstructionToAccess[Access.second] = MemAccs.back();
     }
   }
 }
@@ -650,10 +765,8 @@ __isl_give isl_set *ScopStmt::addConditionsToDomain(__isl_take isl_set *Domain,
   do {
     if (BranchingBB != CurrentRegion->getEntry()) {
       if (const BBCond *Condition = tempScop.getBBCond(BranchingBB))
-        for (BBCond::const_iterator CI = Condition->begin(),
-                                    CE = Condition->end();
-             CI != CE; ++CI) {
-          isl_set *ConditionSet = buildConditionSet(*CI);
+        for (const auto &C : *Condition) {
+          isl_set *ConditionSet = buildConditionSet(C);
           Domain = isl_set_intersect(Domain, ConditionSet);
         }
     }
@@ -706,34 +819,40 @@ ScopStmt::ScopStmt(Scop &parent, TempScop &tempScop, const Region &CurRegion,
   Domain = buildDomain(tempScop, CurRegion);
   buildScattering(Scatter);
   buildAccesses(tempScop, CurRegion);
-  checkForReduction();
+  checkForReductions();
 }
 
-void ScopStmt::checkForReduction() {
-  // Skip statements with more than one binary reduction
-  if (MemAccs.size() != 2)
-    return;
-
-  // Skip if there is not exactly one load and one store
-  unsigned LoadIdx = MemAccs[0]->isRead() ? 0 : 1;
-  auto *Load = dyn_cast<LoadInst>(MemAccs[LoadIdx]->getAccessInstruction());
-  auto *Store =
-      dyn_cast<StoreInst>(MemAccs[1 - LoadIdx]->getAccessInstruction());
-  if (!Load || !Store ||
-      Load->getPointerOperand() != Store->getPointerOperand())
+/// @brief Collect loads which might form a reduction chain with @p StoreMA
+///
+/// Check if the stored value for @p StoreMA is a binary operator with one or
+/// two loads as operands. If the binary operand is commutative & associative,
+/// used only once (by @p StoreMA) and its load operands are also used only
+/// once, we have found a possible reduction chain. It starts at an operand
+/// load and includes the binary operator and @p StoreMA.
+///
+/// Note: We allow only one use to ensure the load and binary operator cannot
+///       escape this block or into any other store except @p StoreMA.
+void ScopStmt::collectCandiateReductionLoads(
+    MemoryAccess *StoreMA, SmallVectorImpl<MemoryAccess *> &Loads) {
+  auto *Store = dyn_cast<StoreInst>(StoreMA->getAccessInstruction());
+  if (!Store)
     return;
 
   // Skip if there is not one binary operator between the load and the store
   auto *BinOp = dyn_cast<BinaryOperator>(Store->getValueOperand());
-  if (!BinOp || (BinOp->getOperand(0) != Load && BinOp->getOperand(1) != Load))
+  if (!BinOp)
+    return;
+
+  // Skip if the binary operators has multiple uses
+  if (BinOp->getNumUses() != 1)
     return;
 
   // Skip if the opcode of the binary operator is not commutative/associative
   if (!BinOp->isCommutative() || !BinOp->isAssociative())
     return;
 
-  // Skip if the load has multiple uses
-  if (Load->getNumUses() != 1)
+  // Skip if the binary operator is outside the current SCoP
+  if (BinOp->getParent() != Store->getParent())
     return;
 
   // Skip if it is a multiplicative reduction and we disabled them
@@ -742,9 +861,94 @@ void ScopStmt::checkForReduction() {
        BinOp->getOpcode() == Instruction::FMul))
     return;
 
-  // Valid reduction like access
-  MemAccs[0]->markReductionLike();
-  MemAccs[1]->markReductionLike();
+  // Check the binary operator operands for a candidate load
+  auto *PossibleLoad0 = dyn_cast<LoadInst>(BinOp->getOperand(0));
+  auto *PossibleLoad1 = dyn_cast<LoadInst>(BinOp->getOperand(1));
+  if (!PossibleLoad0 && !PossibleLoad1)
+    return;
+
+  // A load is only a candidate if it cannot escape (thus has only this use)
+  if (PossibleLoad0 && PossibleLoad0->getNumUses() == 1)
+    if (PossibleLoad0->getParent() == Store->getParent())
+      Loads.push_back(lookupAccessFor(PossibleLoad0));
+  if (PossibleLoad1 && PossibleLoad1->getNumUses() == 1)
+    if (PossibleLoad1->getParent() == Store->getParent())
+      Loads.push_back(lookupAccessFor(PossibleLoad1));
+}
+
+/// @brief Check for reductions in this ScopStmt
+///
+/// Iterate over all store memory accesses and check for valid binary reduction
+/// like chains. For all candidates we check if they have the same base address
+/// and there are no other accesses which overlap with them. The base address
+/// check rules out impossible reductions candidates early. The overlap check,
+/// together with the "only one user" check in collectCandiateReductionLoads,
+/// guarantees that none of the intermediate results will escape during
+/// execution of the loop nest. We basically check here that no other memory
+/// access can access the same memory as the potential reduction.
+void ScopStmt::checkForReductions() {
+  SmallVector<MemoryAccess *, 2> Loads;
+  SmallVector<std::pair<MemoryAccess *, MemoryAccess *>, 4> Candidates;
+
+  // First collect candidate load-store reduction chains by iterating over all
+  // stores and collecting possible reduction loads.
+  for (MemoryAccess *StoreMA : MemAccs) {
+    if (StoreMA->isRead())
+      continue;
+
+    Loads.clear();
+    collectCandiateReductionLoads(StoreMA, Loads);
+    for (MemoryAccess *LoadMA : Loads)
+      Candidates.push_back(std::make_pair(LoadMA, StoreMA));
+  }
+
+  // Then check each possible candidate pair.
+  for (const auto &CandidatePair : Candidates) {
+    bool Valid = true;
+    isl_map *LoadAccs = CandidatePair.first->getAccessRelation();
+    isl_map *StoreAccs = CandidatePair.second->getAccessRelation();
+
+    // Skip those with obviously unequal base addresses.
+    if (!isl_map_has_equal_space(LoadAccs, StoreAccs)) {
+      isl_map_free(LoadAccs);
+      isl_map_free(StoreAccs);
+      continue;
+    }
+
+    // And check if the remaining for overlap with other memory accesses.
+    isl_map *AllAccsRel = isl_map_union(LoadAccs, StoreAccs);
+    AllAccsRel = isl_map_intersect_domain(AllAccsRel, getDomain());
+    isl_set *AllAccs = isl_map_range(AllAccsRel);
+
+    for (MemoryAccess *MA : MemAccs) {
+      if (MA == CandidatePair.first || MA == CandidatePair.second)
+        continue;
+
+      isl_map *AccRel =
+          isl_map_intersect_domain(MA->getAccessRelation(), getDomain());
+      isl_set *Accs = isl_map_range(AccRel);
+
+      if (isl_set_has_equal_space(AllAccs, Accs) || isl_set_free(Accs)) {
+        isl_set *OverlapAccs = isl_set_intersect(Accs, isl_set_copy(AllAccs));
+        Valid = Valid && isl_set_is_empty(OverlapAccs);
+        isl_set_free(OverlapAccs);
+      }
+    }
+
+    isl_set_free(AllAccs);
+    if (!Valid)
+      continue;
+
+    const LoadInst *Load =
+        dyn_cast<const LoadInst>(CandidatePair.first->getAccessInstruction());
+    MemoryAccess::ReductionType RT =
+        getReductionType(dyn_cast<BinaryOperator>(Load->user_back()), Load);
+
+    // If no overlapping access was found we mark the load and store as
+    // reduction like.
+    CandidatePair.first->markAsReductionLike(RT);
+    CandidatePair.second->markAsReductionLike(RT);
+  }
 }
 
 std::string ScopStmt::getDomainStr() const { return stringFromIslObj(Domain); }
@@ -814,9 +1018,8 @@ void ScopStmt::print(raw_ostream &OS) const {
   } else
     OS.indent(16) << "n/a\n";
 
-  for (MemoryAccessVec::const_iterator I = MemAccs.begin(), E = MemAccs.end();
-       I != E; ++I)
-    (*I)->print(OS);
+  for (MemoryAccess *Access : MemAccs)
+    Access->print(OS);
 }
 
 void ScopStmt::dump() const { print(dbgs()); }
@@ -831,11 +1034,7 @@ void Scop::setContext(__isl_take isl_set *NewContext) {
 }
 
 void Scop::addParams(std::vector<const SCEV *> NewParameters) {
-  for (std::vector<const SCEV *>::iterator PI = NewParameters.begin(),
-                                           PE = NewParameters.end();
-       PI != PE; ++PI) {
-    const SCEV *Parameter = *PI;
-
+  for (const SCEV *Parameter : NewParameters) {
     if (ParameterIds.find(Parameter) != ParameterIds.end())
       continue;
 
@@ -903,18 +1102,50 @@ void Scop::realignParams() {
   // Add all parameters into a common model.
   isl_space *Space = isl_space_params_alloc(IslCtx, ParameterIds.size());
 
-  for (ParamIdType::iterator PI = ParameterIds.begin(), PE = ParameterIds.end();
-       PI != PE; ++PI) {
-    const SCEV *Parameter = PI->first;
+  for (const auto &ParamID : ParameterIds) {
+    const SCEV *Parameter = ParamID.first;
     isl_id *id = getIdForParam(Parameter);
-    Space = isl_space_set_dim_id(Space, isl_dim_param, PI->second, id);
+    Space = isl_space_set_dim_id(Space, isl_dim_param, ParamID.second, id);
   }
 
   // Align the parameters of all data structures to the model.
   Context = isl_set_align_params(Context, Space);
 
-  for (iterator I = begin(), E = end(); I != E; ++I)
-    (*I)->realignParams();
+  for (ScopStmt *Stmt : *this)
+    Stmt->realignParams();
+}
+
+void Scop::simplifyAssumedContext() {
+  // The parameter constraints of the iteration domains give us a set of
+  // constraints that need to hold for all cases where at least a single
+  // statement iteration is executed in the whole scop. We now simplify the
+  // assumed context under the assumption that such constraints hold and at
+  // least a single statement iteration is executed. For cases where no
+  // statement instances are executed, the assumptions we have taken about
+  // the executed code do not matter and can be changed.
+  //
+  // WARNING: This only holds if the assumptions we have taken do not reduce
+  //          the set of statement instances that are executed. Otherwise we
+  //          may run into a case where the iteration domains suggest that
+  //          for a certain set of parameter constraints no code is executed,
+  //          but in the original program some computation would have been
+  //          performed. In such a case, modifying the run-time conditions and
+  //          possibly influencing the run-time check may cause certain scops
+  //          to not be executed.
+  //
+  // Example:
+  //
+  //   When delinearizing the following code:
+  //
+  //     for (long i = 0; i < 100; i++)
+  //       for (long j = 0; j < m; j++)
+  //         A[i+p][j] = 1.0;
+  //
+  //   we assume that the condition m <= 0 or (m >= 1 and p >= 0) holds as
+  //   otherwise we would access out of bound data. Now, knowing that code is
+  //   only executed for the case m >= 0, it is sufficient to assume p >= 0.
+  AssumedContext =
+      isl_set_gist_params(AssumedContext, isl_union_set_params(getDomains()));
 }
 
 Scop::Scop(TempScop &tempScop, LoopInfo &LI, ScalarEvolution &ScalarEvolution,
@@ -935,6 +1166,7 @@ Scop::Scop(TempScop &tempScop, LoopInfo &LI, ScalarEvolution &ScalarEvolution,
 
   realignParams();
   addParameterBounds();
+  simplifyAssumedContext();
 
   assert(NestLoops.empty() && "NestLoops not empty at top level!");
 }
@@ -944,11 +1176,14 @@ Scop::~Scop() {
   isl_set_free(AssumedContext);
 
   // Free the statements;
-  for (iterator I = begin(), E = end(); I != E; ++I)
-    delete *I;
+  for (ScopStmt *Stmt : *this)
+    delete Stmt;
 }
 
 std::string Scop::getContextStr() const { return stringFromIslObj(Context); }
+std::string Scop::getAssumedContextStr() const {
+  return stringFromIslObj(AssumedContext);
+}
 
 std::string Scop::getNameStr() const {
   std::string ExitName, EntryName;
@@ -976,6 +1211,10 @@ __isl_give isl_set *Scop::getAssumedContext() const {
   return isl_set_copy(AssumedContext);
 }
 
+void Scop::addAssumption(__isl_take isl_set *Set) {
+  AssumedContext = isl_set_intersect(AssumedContext, Set);
+}
+
 void Scop::printContext(raw_ostream &OS) const {
   OS << "Context:\n";
 
@@ -986,12 +1225,16 @@ void Scop::printContext(raw_ostream &OS) const {
 
   OS.indent(4) << getContextStr() << "\n";
 
-  for (ParamVecType::const_iterator PI = Parameters.begin(),
-                                    PE = Parameters.end();
-       PI != PE; ++PI) {
-    const SCEV *Parameter = *PI;
-    int Dim = ParameterIds.find(Parameter)->second;
+  OS.indent(4) << "Assumed Context:\n";
+  if (!AssumedContext) {
+    OS.indent(4) << "n/a\n\n";
+    return;
+  }
 
+  OS.indent(4) << getAssumedContextStr() << "\n";
+
+  for (const SCEV *Parameter : Parameters) {
+    int Dim = ParameterIds.find(Parameter)->second;
     OS.indent(4) << "p" << Dim << ": " << *Parameter << "\n";
   }
 }
@@ -999,8 +1242,8 @@ void Scop::printContext(raw_ostream &OS) const {
 void Scop::printStatements(raw_ostream &OS) const {
   OS << "Statements {\n";
 
-  for (const_iterator SI = begin(), SE = end(); SI != SE; ++SI)
-    OS.indent(4) << (**SI);
+  for (ScopStmt *Stmt : *this)
+    OS.indent(4) << *Stmt;
 
   OS.indent(4) << "}\n";
 }
@@ -1018,14 +1261,10 @@ void Scop::dump() const { print(dbgs()); }
 isl_ctx *Scop::getIslCtx() const { return IslCtx; }
 
 __isl_give isl_union_set *Scop::getDomains() {
-  isl_union_set *Domain = nullptr;
+  isl_union_set *Domain = isl_union_set_empty(getParamSpace());
 
-  for (Scop::iterator SI = begin(), SE = end(); SI != SE; ++SI)
-    if (!Domain)
-      Domain = isl_union_set_from_set((*SI)->getDomain());
-    else
-      Domain = isl_union_set_union(Domain,
-                                   isl_union_set_from_set((*SI)->getDomain()));
+  for (ScopStmt *Stmt : *this)
+    Domain = isl_union_set_add_set(Domain, Stmt->getDomain());
 
   return Domain;
 }
@@ -1033,16 +1272,13 @@ __isl_give isl_union_set *Scop::getDomains() {
 __isl_give isl_union_map *Scop::getWrites() {
   isl_union_map *Write = isl_union_map_empty(this->getParamSpace());
 
-  for (Scop::iterator SI = this->begin(), SE = this->end(); SI != SE; ++SI) {
-    ScopStmt *Stmt = *SI;
-
+  for (ScopStmt *Stmt : *this) {
     for (MemoryAccess *MA : *Stmt) {
       if (!MA->isWrite())
         continue;
 
       isl_set *Domain = Stmt->getDomain();
       isl_map *AccessDomain = MA->getAccessRelation();
-
       AccessDomain = isl_map_intersect_domain(AccessDomain, Domain);
       Write = isl_union_map_add_map(Write, AccessDomain);
     }
@@ -1051,11 +1287,9 @@ __isl_give isl_union_map *Scop::getWrites() {
 }
 
 __isl_give isl_union_map *Scop::getReads() {
-  isl_union_map *Read = isl_union_map_empty(this->getParamSpace());
+  isl_union_map *Read = isl_union_map_empty(getParamSpace());
 
-  for (Scop::iterator SI = this->begin(), SE = this->end(); SI != SE; ++SI) {
-    ScopStmt *Stmt = *SI;
-
+  for (ScopStmt *Stmt : *this) {
     for (MemoryAccess *MA : *Stmt) {
       if (!MA->isRead())
         continue;
@@ -1071,21 +1305,18 @@ __isl_give isl_union_map *Scop::getReads() {
 }
 
 __isl_give isl_union_map *Scop::getSchedule() {
-  isl_union_map *Schedule = isl_union_map_empty(this->getParamSpace());
+  isl_union_map *Schedule = isl_union_map_empty(getParamSpace());
 
-  for (Scop::iterator SI = this->begin(), SE = this->end(); SI != SE; ++SI) {
-    ScopStmt *Stmt = *SI;
+  for (ScopStmt *Stmt : *this)
     Schedule = isl_union_map_add_map(Schedule, Stmt->getScattering());
-  }
+
   return isl_union_map_coalesce(Schedule);
 }
 
 bool Scop::restrictDomains(__isl_take isl_union_set *Domain) {
   bool Changed = false;
-  for (Scop::iterator SI = this->begin(), SE = this->end(); SI != SE; ++SI) {
-    ScopStmt *Stmt = *SI;
+  for (ScopStmt *Stmt : *this) {
     isl_union_set *StmtDomain = isl_union_set_from_set(Stmt->getDomain());
-
     isl_union_set *NewStmtDomain = isl_union_set_intersect(
         isl_union_set_copy(StmtDomain), isl_union_set_copy(Domain));
 

@@ -28,6 +28,7 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
+#include "llvm/Support/Casting.h"
 
 #include <string>
 #include <memory>
@@ -52,6 +53,68 @@ namespace polly {
 void getDebugLocation(const Region *R, unsigned &LineBegin, unsigned &LineEnd,
                       std::string &FileName);
 
+class RejectLog;
+/// @brief Emit optimization remarks about the rejected regions to the user.
+///
+/// This emits the content of the reject log as optimization remarks.
+/// Remember to at least track failures (-polly-detect-track-failures).
+/// @param F The function we emit remarks for.
+/// @param Log The error log containing all messages being emitted as remark.
+void emitRejectionRemarks(const llvm::Function &F, const RejectLog &Log);
+
+/// @brief Emit diagnostic remarks for a valid Scop
+///
+/// @param F The function we emit remarks for
+/// @param R The region that marks a valid Scop
+void emitValidRemarks(const llvm::Function &F, const Region *R);
+
+// Discriminator for LLVM-style RTTI (dyn_cast<> et al.)
+enum RejectReasonKind {
+  // CFG Category
+  rrkCFG,
+  rrkNonBranchTerminator,
+  rrkCondition,
+  rrkLastCFG,
+
+  // Non-Affinity
+  rrkAffFunc,
+  rrkUndefCond,
+  rrkInvalidCond,
+  rrkUndefOperand,
+  rrkNonAffBranch,
+  rrkNoBasePtr,
+  rrkUndefBasePtr,
+  rrkVariantBasePtr,
+  rrkNonAffineAccess,
+  rrkLastAffFunc,
+
+  // IndVar
+  rrkIndVar,
+  rrkPhiNodeRefInRegion,
+  rrkNonCanonicalPhiNode,
+  rrkLoopHeader,
+  rrkLastIndVar,
+
+  rrkIndEdge,
+
+  rrkLoopBound,
+
+  rrkFuncCall,
+
+  rrkAlias,
+
+  rrkSimpleLoop,
+
+  // Other
+  rrkOther,
+  rrkIntToPtr,
+  rrkAlloca,
+  rrkUnknownInst,
+  rrkPHIinExit,
+  rrkEntry,
+  rrkLastOther
+};
+
 //===----------------------------------------------------------------------===//
 /// @brief Base class of all reject reasons found during Scop detection.
 ///
@@ -60,13 +123,40 @@ void getDebugLocation(const Region *R, unsigned &LineBegin, unsigned &LineEnd,
 /// went wrong in the Scop detection.
 class RejectReason {
   //===--------------------------------------------------------------------===//
+private:
+  const RejectReasonKind Kind;
+
+protected:
+  static const DebugLoc Unknown;
+
 public:
+  RejectReasonKind getKind() const { return Kind; }
+
+  RejectReason(RejectReasonKind K) : Kind(K) {}
+
   virtual ~RejectReason() {}
 
   /// @brief Generate a reasonable diagnostic message describing this error.
   ///
   /// @return A debug message representing this error.
   virtual std::string getMessage() const = 0;
+
+  /// @brief Generate a message for the end-user describing this error.
+  ///
+  /// The message provided has to be suitable for the end-user. So it should
+  /// not reference any LLVM internal data structures or terminology.
+  /// Ideally, the message helps the end-user to increase the size of the
+  /// regions amenable to Polly.
+  ///
+  /// @return A short message representing this error.
+  virtual std::string getEndUserMessage() const {
+    return "Unspecified error.";
+  };
+
+  /// @brief Get the source location of this error.
+  ///
+  /// @return The debug location for this error.
+  virtual const llvm::DebugLoc &getDebugLoc() const;
 };
 
 typedef std::shared_ptr<RejectReason> RejectReasonPtr;
@@ -79,14 +169,55 @@ class RejectLog {
 public:
   explicit RejectLog(Region *R) : R(R) {}
 
-  typedef llvm::SmallVector<RejectReasonPtr, 1>::iterator iterator;
+  typedef llvm::SmallVector<RejectReasonPtr, 1>::const_iterator iterator;
 
-  iterator begin() { return ErrorReports.begin(); }
-  iterator end() { return ErrorReports.end(); }
-  size_t size() { return ErrorReports.size(); }
+  iterator begin() const { return ErrorReports.begin(); }
+  iterator end() const { return ErrorReports.end(); }
+  size_t size() const { return ErrorReports.size(); }
+  bool hasErrors() const { return size() > 0; }
 
   const Region *region() const { return R; }
   void report(RejectReasonPtr Reject) { ErrorReports.push_back(Reject); }
+};
+
+/// @brief Store reject logs
+class RejectLogsContainer {
+  std::map<const Region *, RejectLog> Logs;
+
+public:
+  typedef std::map<const Region *, RejectLog>::iterator iterator;
+  typedef std::map<const Region *, RejectLog>::const_iterator const_iterator;
+
+  iterator begin() { return Logs.begin(); }
+  iterator end() { return Logs.end(); }
+
+  const_iterator begin() const { return Logs.begin(); }
+  const_iterator end() const { return Logs.end(); }
+
+  void insert(std::pair<const Region *, RejectLog> New) {
+    auto Result = Logs.insert(New);
+    assert(Result.second && "Tried to replace an element in the log!");
+  }
+
+  std::map<const Region *, RejectLog>::mapped_type at(const Region *R) {
+    return Logs.at(R);
+  }
+
+  void clear() { Logs.clear(); }
+
+  size_t count(const Region *R) const { return Logs.count(R); }
+
+  size_t size(const Region *R) const {
+    if (!Logs.count(R))
+      return 0;
+    return Logs.at(R).size();
+  }
+
+  bool hasErrors(const Region *R) const {
+    return (Logs.count(R) && Logs.at(R).size() > 0);
+  }
+
+  bool hasErrors(Region *R) const { return hasErrors((const Region *)R); }
 };
 
 //===----------------------------------------------------------------------===//
@@ -97,18 +228,32 @@ public:
 class ReportCFG : public RejectReason {
   //===--------------------------------------------------------------------===//
 public:
-  ReportCFG();
+  ReportCFG(const RejectReasonKind K);
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
 };
 
+//===----------------------------------------------------------------------===//
+/// @brief Captures a non-branch terminator within a Scop candidate.
 class ReportNonBranchTerminator : public ReportCFG {
   BasicBlock *BB;
 
 public:
-  ReportNonBranchTerminator(BasicBlock *BB) : BB(BB) {}
+  ReportNonBranchTerminator(BasicBlock *BB)
+      : ReportCFG(rrkNonBranchTerminator), BB(BB) {}
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
 
   /// @name RejectReason interface
   //@{
-  virtual std::string getMessage() const;
+  virtual std::string getMessage() const override;
+  virtual const DebugLoc &getDebugLoc() const override;
   //@}
 };
 
@@ -121,11 +266,17 @@ class ReportCondition : public ReportCFG {
   BasicBlock *BB;
 
 public:
-  ReportCondition(BasicBlock *BB) : BB(BB) {}
+  ReportCondition(BasicBlock *BB) : ReportCFG(rrkCondition), BB(BB) {}
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
 
   /// @name RejectReason interface
   //@{
-  virtual std::string getMessage() const;
+  virtual std::string getMessage() const override;
+  virtual const DebugLoc &getDebugLoc() const override;
   //@}
 };
 
@@ -136,8 +287,24 @@ public:
 /// this class.
 class ReportAffFunc : public RejectReason {
   //===--------------------------------------------------------------------===//
+
+  // The instruction that caused non-affinity to occur.
+  const Instruction *Inst;
+
 public:
-  ReportAffFunc();
+  ReportAffFunc(const RejectReasonKind K, const Instruction *Inst);
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
+
+  /// @name RejectReason interface
+  //@{
+  virtual const DebugLoc &getDebugLoc() const override {
+    return Inst->getDebugLoc();
+  };
+  //@}
 };
 
 //===----------------------------------------------------------------------===//
@@ -149,11 +316,17 @@ class ReportUndefCond : public ReportAffFunc {
   BasicBlock *BB;
 
 public:
-  ReportUndefCond(BasicBlock *BB) : BB(BB) {}
+  ReportUndefCond(const Instruction *Inst, BasicBlock *BB)
+      : ReportAffFunc(rrkUndefCond, Inst), BB(BB) {}
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
 
   /// @name RejectReason interface
   //@{
-  virtual std::string getMessage() const;
+  virtual std::string getMessage() const override;
   //@}
 };
 
@@ -168,11 +341,17 @@ class ReportInvalidCond : public ReportAffFunc {
   BasicBlock *BB;
 
 public:
-  ReportInvalidCond(BasicBlock *BB) : BB(BB) {}
+  ReportInvalidCond(const Instruction *Inst, BasicBlock *BB)
+      : ReportAffFunc(rrkInvalidCond, Inst), BB(BB) {}
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
 
   /// @name RejectReason interface
   //@{
-  virtual std::string getMessage() const;
+  virtual std::string getMessage() const override;
   //@}
 };
 
@@ -185,11 +364,17 @@ class ReportUndefOperand : public ReportAffFunc {
   BasicBlock *BB;
 
 public:
-  ReportUndefOperand(BasicBlock *BB) : BB(BB) {}
+  ReportUndefOperand(BasicBlock *BB, const Instruction *Inst)
+      : ReportAffFunc(rrkUndefOperand, Inst), BB(BB) {}
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
 
   /// @name RejectReason interface
   //@{
-  virtual std::string getMessage() const;
+  virtual std::string getMessage() const override;
   //@}
 };
 
@@ -208,15 +393,21 @@ class ReportNonAffBranch : public ReportAffFunc {
   //@}
 
 public:
-  ReportNonAffBranch(BasicBlock *BB, const SCEV *LHS, const SCEV *RHS)
-      : BB(BB), LHS(LHS), RHS(RHS) {}
+  ReportNonAffBranch(BasicBlock *BB, const SCEV *LHS, const SCEV *RHS,
+                     const Instruction *Inst)
+      : ReportAffFunc(rrkNonAffBranch, Inst), BB(BB), LHS(LHS), RHS(RHS) {}
 
   const SCEV *lhs() { return LHS; }
   const SCEV *rhs() { return RHS; }
 
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
+
   /// @name RejectReason interface
   //@{
-  virtual std::string getMessage() const;
+  virtual std::string getMessage() const override;
   //@}
 };
 
@@ -225,9 +416,17 @@ public:
 class ReportNoBasePtr : public ReportAffFunc {
   //===--------------------------------------------------------------------===//
 public:
+  ReportNoBasePtr(const Instruction *Inst)
+      : ReportAffFunc(rrkNoBasePtr, Inst) {}
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
+
   /// @name RejectReason interface
   //@{
-  virtual std::string getMessage() const;
+  virtual std::string getMessage() const override;
   //@}
 };
 
@@ -236,9 +435,17 @@ public:
 class ReportUndefBasePtr : public ReportAffFunc {
   //===--------------------------------------------------------------------===//
 public:
+  ReportUndefBasePtr(const Instruction *Inst)
+      : ReportAffFunc(rrkUndefBasePtr, Inst) {}
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
+
   /// @name RejectReason interface
   //@{
-  virtual std::string getMessage() const;
+  virtual std::string getMessage() const override;
   //@}
 };
 
@@ -251,11 +458,18 @@ class ReportVariantBasePtr : public ReportAffFunc {
   Value *BaseValue;
 
 public:
-  ReportVariantBasePtr(Value *BaseValue) : BaseValue(BaseValue) {}
+  ReportVariantBasePtr(Value *BaseValue, const Instruction *Inst)
+      : ReportAffFunc(rrkVariantBasePtr, Inst), BaseValue(BaseValue) {}
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
 
   /// @name RejectReason interface
   //@{
-  virtual std::string getMessage() const;
+  virtual std::string getMessage() const override;
+  virtual std::string getEndUserMessage() const override;
   //@}
 };
 
@@ -268,14 +482,20 @@ class ReportNonAffineAccess : public ReportAffFunc {
   const SCEV *AccessFunction;
 
 public:
-  ReportNonAffineAccess(const SCEV *AccessFunction)
-      : AccessFunction(AccessFunction) {}
+  ReportNonAffineAccess(const SCEV *AccessFunction, const Instruction *Inst)
+      : ReportAffFunc(rrkNonAffineAccess, Inst),
+        AccessFunction(AccessFunction) {}
 
   const SCEV *get() { return AccessFunction; }
 
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
+
   /// @name RejectReason interface
   //@{
-  virtual std::string getMessage() const;
+  virtual std::string getMessage() const override;
   //@}
 };
 
@@ -287,7 +507,7 @@ public:
 class ReportIndVar : public RejectReason {
   //===--------------------------------------------------------------------===//
 public:
-  ReportIndVar();
+  ReportIndVar(const RejectReasonKind K);
 };
 
 //===----------------------------------------------------------------------===//
@@ -299,11 +519,17 @@ class ReportPhiNodeRefInRegion : public ReportIndVar {
   Instruction *Inst;
 
 public:
-  ReportPhiNodeRefInRegion(Instruction *Inst) : Inst(Inst) {}
+  ReportPhiNodeRefInRegion(Instruction *Inst);
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
 
   /// @name RejectReason interface
   //@{
-  virtual std::string getMessage() const;
+  virtual std::string getMessage() const override;
+  virtual const DebugLoc &getDebugLoc() const override;
   //@}
 };
 
@@ -316,11 +542,17 @@ class ReportNonCanonicalPhiNode : public ReportIndVar {
   Instruction *Inst;
 
 public:
-  ReportNonCanonicalPhiNode(Instruction *Inst) : Inst(Inst) {}
+  ReportNonCanonicalPhiNode(Instruction *Inst);
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
 
   /// @name RejectReason interface
   //@{
-  virtual std::string getMessage() const;
+  virtual std::string getMessage() const override;
+  virtual const DebugLoc &getDebugLoc() const override;
   //@}
 };
 
@@ -333,11 +565,17 @@ class ReportLoopHeader : public ReportIndVar {
   Loop *L;
 
 public:
-  ReportLoopHeader(Loop *L) : L(L) {}
+  ReportLoopHeader(Loop *L);
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
 
   /// @name RejectReason interface
   //@{
-  virtual std::string getMessage() const;
+  virtual std::string getMessage() const override;
+  virtual const DebugLoc &getDebugLoc() const override;
   //@}
 };
 
@@ -345,12 +583,21 @@ public:
 /// @brief Captures a region with invalid entering edges.
 class ReportIndEdge : public RejectReason {
   //===--------------------------------------------------------------------===//
+
+  BasicBlock *BB;
+
 public:
-  ReportIndEdge();
+  ReportIndEdge(BasicBlock *BB);
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
 
   /// @name RejectReason interface
   //@{
-  virtual std::string getMessage() const;
+  virtual std::string getMessage() const override;
+  virtual const DebugLoc &getDebugLoc() const override;
   //@}
 };
 
@@ -370,9 +617,15 @@ public:
 
   const SCEV *loopCount() { return LoopCount; }
 
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
+
   /// @name RejectReason interface
   //@{
-  virtual std::string getMessage() const;
+  virtual std::string getMessage() const override;
+  virtual const DebugLoc &getDebugLoc() const override;
   //@}
 };
 
@@ -387,9 +640,16 @@ class ReportFuncCall : public RejectReason {
 public:
   ReportFuncCall(Instruction *Inst);
 
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
+
   /// @name RejectReason interface
   //@{
-  std::string getMessage() const;
+  virtual std::string getMessage() const override;
+  virtual const DebugLoc &getDebugLoc() const override;
+  virtual std::string getEndUserMessage() const override;
   //@}
 };
 
@@ -398,20 +658,28 @@ public:
 class ReportAlias : public RejectReason {
   //===--------------------------------------------------------------------===//
 
-  // The offending alias set.
-  AliasSet *AS;
-
   /// @brief Format an invalid alias set.
   ///
   /// @param AS The invalid alias set to format.
   std::string formatInvalidAlias(AliasSet &AS) const;
 
+  Instruction *Inst;
+  AliasSet &AS;
+
 public:
-  ReportAlias(AliasSet *AS);
+  ReportAlias(Instruction *Inst, AliasSet &AS);
+
+  AliasSet &getAliasSet() { return AS; }
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
 
   /// @name RejectReason interface
   //@{
-  std::string getMessage() const;
+  virtual std::string getMessage() const override;
+  virtual const DebugLoc &getDebugLoc() const override;
   //@}
 };
 
@@ -422,9 +690,14 @@ class ReportSimpleLoop : public RejectReason {
 public:
   ReportSimpleLoop();
 
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
+
   /// @name RejectReason interface
   //@{
-  std::string getMessage() const;
+  virtual std::string getMessage() const override;
   //@}
 };
 
@@ -433,11 +706,16 @@ public:
 class ReportOther : public RejectReason {
   //===--------------------------------------------------------------------===//
 public:
-  ReportOther();
+  ReportOther(const RejectReasonKind K);
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
 
   /// @name RejectReason interface
   //@{
-  std::string getMessage() const { return "Unknown reject reason"; }
+  virtual std::string getMessage() const override;
   //@}
 };
 
@@ -447,14 +725,20 @@ class ReportIntToPtr : public ReportOther {
   //===--------------------------------------------------------------------===//
 
   // The offending base value.
-  Value *BaseValue;
+  Instruction *BaseValue;
 
 public:
-  ReportIntToPtr(Value *BaseValue) : BaseValue(BaseValue) {}
+  ReportIntToPtr(Instruction *BaseValue);
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
 
   /// @name RejectReason interface
   //@{
-  std::string getMessage() const;
+  virtual std::string getMessage() const override;
+  virtual const DebugLoc &getDebugLoc() const override;
   //@}
 };
 
@@ -465,11 +749,17 @@ class ReportAlloca : public ReportOther {
   Instruction *Inst;
 
 public:
-  ReportAlloca(Instruction *Inst) : Inst(Inst) {}
+  ReportAlloca(Instruction *Inst);
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
 
   /// @name RejectReason interface
   //@{
-  std::string getMessage() const;
+  virtual std::string getMessage() const override;
+  virtual const DebugLoc &getDebugLoc() const override;
   //@}
 };
 
@@ -480,11 +770,17 @@ class ReportUnknownInst : public ReportOther {
   Instruction *Inst;
 
 public:
-  ReportUnknownInst(Instruction *Inst) : Inst(Inst) {}
+  ReportUnknownInst(Instruction *Inst);
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
 
   /// @name RejectReason interface
   //@{
-  std::string getMessage() const;
+  virtual std::string getMessage() const override;
+  virtual const DebugLoc &getDebugLoc() const override;
   //@}
 };
 
@@ -492,10 +788,20 @@ public:
 /// @brief Captures errors with phi nodes in exit BBs.
 class ReportPHIinExit : public ReportOther {
   //===--------------------------------------------------------------------===//
+  Instruction *Inst;
+
 public:
+  ReportPHIinExit(Instruction *Inst);
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
+
   /// @name RejectReason interface
   //@{
-  std::string getMessage() const;
+  virtual std::string getMessage() const override;
+  virtual const DebugLoc &getDebugLoc() const override;
   //@}
 };
 
@@ -503,10 +809,20 @@ public:
 /// @brief Captures errors with regions containing the function entry block.
 class ReportEntry : public ReportOther {
   //===--------------------------------------------------------------------===//
+  BasicBlock *BB;
+
 public:
+  ReportEntry(BasicBlock *BB);
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
+
   /// @name RejectReason interface
   //@{
-  std::string getMessage() const;
+  virtual std::string getMessage() const override;
+  virtual const DebugLoc &getDebugLoc() const override;
   //@}
 };
 

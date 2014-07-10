@@ -22,12 +22,15 @@
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/AliasSetTracker.h"
 #include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/DebugInfo.h"
+#include "llvm/IR/DebugLoc.h"
+#include "llvm/IR/DiagnosticInfo.h"
+#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Value.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 
 #include "llvm/Analysis/RegionInfo.h"
-#include "llvm/IR/DebugInfo.h"
 
 #define DEBUG_TYPE "polly-detect"
 #include "llvm/Support/Debug.h"
@@ -81,75 +84,279 @@ void getDebugLocation(const Region *R, unsigned &LineBegin, unsigned &LineEnd,
     }
 }
 
+void emitRejectionRemarks(const llvm::Function &F, const RejectLog &Log) {
+  LLVMContext &Ctx = F.getContext();
+
+  const Region *R = Log.region();
+  const BasicBlock *Entry = R->getEntry();
+  DebugLoc DL = Entry->getTerminator()->getDebugLoc();
+
+  emitOptimizationRemarkMissed(
+      Ctx, DEBUG_TYPE, F, DL,
+      "The following errors keep this region from being a Scop.");
+  for (RejectReasonPtr RR : Log) {
+    const DebugLoc &Loc = RR->getDebugLoc();
+    if (!Loc.isUnknown())
+      emitOptimizationRemarkMissed(Ctx, DEBUG_TYPE, F, Loc,
+                                   RR->getEndUserMessage());
+  }
+}
+
+void emitValidRemarks(const llvm::Function &F, const Region *R) {
+  LLVMContext &Ctx = F.getContext();
+
+  const BasicBlock *Entry = R->getEntry();
+  const BasicBlock *Exit = R->getExit();
+
+  const DebugLoc &Begin = Entry->getFirstNonPHIOrDbg()->getDebugLoc();
+  const DebugLoc &End = Exit->getFirstNonPHIOrDbg()->getDebugLoc();
+
+  emitOptimizationRemark(Ctx, DEBUG_TYPE, F, Begin,
+                         "A valid Scop begins here.");
+  emitOptimizationRemark(Ctx, DEBUG_TYPE, F, End, "A valid Scop ends here.");
+}
+
+//===----------------------------------------------------------------------===//
+// RejectReason.
+const DebugLoc RejectReason::Unknown = DebugLoc();
+
+const llvm::DebugLoc &RejectReason::getDebugLoc() const {
+  // Allocate an empty DebugLoc and return it a reference to it.
+  return Unknown;
+}
+
 //===----------------------------------------------------------------------===//
 // ReportCFG.
 
-ReportCFG::ReportCFG() { ++BadCFGForScop; }
+ReportCFG::ReportCFG(const RejectReasonKind K) : RejectReason(K) {
+  ++BadCFGForScop;
+}
+
+bool ReportCFG::classof(const RejectReason *RR) {
+  return RR->getKind() >= rrkCFG && RR->getKind() <= rrkLastCFG;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportNonBranchTerminator.
 
 std::string ReportNonBranchTerminator::getMessage() const {
   return ("Non branch instruction terminates BB: " + BB->getName()).str();
 }
 
+const DebugLoc &ReportNonBranchTerminator::getDebugLoc() const {
+  return BB->getTerminator()->getDebugLoc();
+}
+
+bool ReportNonBranchTerminator::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkNonBranchTerminator;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportCondition.
+
 std::string ReportCondition::getMessage() const {
   return ("Not well structured condition at BB: " + BB->getName()).str();
 }
 
-ReportAffFunc::ReportAffFunc() { ++BadAffFuncForScop; }
+const DebugLoc &ReportCondition::getDebugLoc() const {
+  return BB->getTerminator()->getDebugLoc();
+}
+
+bool ReportCondition::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkCondition;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportAffFunc.
+
+ReportAffFunc::ReportAffFunc(const RejectReasonKind K, const Instruction *Inst)
+    : RejectReason(K), Inst(Inst) {
+  ++BadAffFuncForScop;
+}
+
+bool ReportAffFunc::classof(const RejectReason *RR) {
+  return RR->getKind() >= rrkAffFunc && RR->getKind() <= rrkLastAffFunc;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportUndefCond.
 
 std::string ReportUndefCond::getMessage() const {
   return ("Condition based on 'undef' value in BB: " + BB->getName()).str();
 }
+
+bool ReportUndefCond::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkUndefCond;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportInvalidCond.
 
 std::string ReportInvalidCond::getMessage() const {
   return ("Condition in BB '" + BB->getName()).str() +
          "' neither constant nor an icmp instruction";
 }
 
+bool ReportInvalidCond::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkInvalidCond;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportUndefOperand.
+
 std::string ReportUndefOperand::getMessage() const {
   return ("undef operand in branch at BB: " + BB->getName()).str();
 }
+
+bool ReportUndefOperand::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkUndefOperand;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportNonAffBranch.
 
 std::string ReportNonAffBranch::getMessage() const {
   return ("Non affine branch in BB '" + BB->getName()).str() + "' with LHS: " +
          *LHS + " and RHS: " + *RHS;
 }
 
+bool ReportNonAffBranch::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkNonAffBranch;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportNoBasePtr.
+
 std::string ReportNoBasePtr::getMessage() const { return "No base pointer"; }
+
+bool ReportNoBasePtr::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkNoBasePtr;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportUndefBasePtr.
 
 std::string ReportUndefBasePtr::getMessage() const {
   return "Undefined base pointer";
 }
 
+bool ReportUndefBasePtr::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkUndefBasePtr;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportVariantBasePtr.
+
 std::string ReportVariantBasePtr::getMessage() const {
   return "Base address not invariant in current region:" + *BaseValue;
 }
+
+std::string ReportVariantBasePtr::getEndUserMessage() const {
+  return "The base address of this array is not invariant inside the loop";
+}
+
+bool ReportVariantBasePtr::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkVariantBasePtr;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportNonAffineAccess.
 
 std::string ReportNonAffineAccess::getMessage() const {
   return "Non affine access function: " + *AccessFunction;
 }
 
-ReportIndVar::ReportIndVar() { ++BadIndVarForScop; }
+bool ReportNonAffineAccess::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkNonAffineAccess;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportIndVar.
+
+ReportIndVar::ReportIndVar(const RejectReasonKind K) : RejectReason(K) {
+  ++BadIndVarForScop;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportPhiNodeRefInRegion.
+
+ReportPhiNodeRefInRegion::ReportPhiNodeRefInRegion(Instruction *Inst)
+    : ReportIndVar(rrkPhiNodeRefInRegion), Inst(Inst) {}
 
 std::string ReportPhiNodeRefInRegion::getMessage() const {
   return "SCEV of PHI node refers to SSA names in region: " + *Inst;
 }
 
+const DebugLoc &ReportPhiNodeRefInRegion::getDebugLoc() const {
+  return Inst->getDebugLoc();
+}
+
+bool ReportPhiNodeRefInRegion::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkPhiNodeRefInRegion;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportNonCanonicalPhiNode.
+
+ReportNonCanonicalPhiNode::ReportNonCanonicalPhiNode(Instruction *Inst)
+    : ReportIndVar(rrkNonCanonicalPhiNode), Inst(Inst) {}
+
 std::string ReportNonCanonicalPhiNode::getMessage() const {
   return "Non canonical PHI node: " + *Inst;
 }
+
+const DebugLoc &ReportNonCanonicalPhiNode::getDebugLoc() const {
+  return Inst->getDebugLoc();
+}
+
+bool ReportNonCanonicalPhiNode::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkNonCanonicalPhiNode;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportLoopHeader.
+
+ReportLoopHeader::ReportLoopHeader(Loop *L)
+    : ReportIndVar(rrkLoopHeader), L(L) {}
 
 std::string ReportLoopHeader::getMessage() const {
   return ("No canonical IV at loop header: " + L->getHeader()->getName()).str();
 }
 
-ReportIndEdge::ReportIndEdge() { ++BadIndEdgeForScop; }
+const DebugLoc &ReportLoopHeader::getDebugLoc() const {
+  BasicBlock *BB = L->getHeader();
+  return BB->getTerminator()->getDebugLoc();
+}
+
+bool ReportLoopHeader::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkLoopHeader;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportIndEdge.
+
+ReportIndEdge::ReportIndEdge(BasicBlock *BB)
+    : RejectReason(rrkIndEdge), BB(BB) {
+  ++BadIndEdgeForScop;
+}
 
 std::string ReportIndEdge::getMessage() const {
   return "Region has invalid entering edges!";
 }
 
+const DebugLoc &ReportIndEdge::getDebugLoc() const {
+  return BB->getTerminator()->getDebugLoc();
+}
+
+bool ReportIndEdge::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkIndEdge;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportLoopBound.
+
 ReportLoopBound::ReportLoopBound(Loop *L, const SCEV *LoopCount)
-    : L(L), LoopCount(LoopCount) {
+    : RejectReason(rrkLoopBound), L(L), LoopCount(LoopCount) {
   ++BadLoopBoundForScop;
 }
 
@@ -158,7 +365,20 @@ std::string ReportLoopBound::getMessage() const {
          L->getHeader()->getName();
 }
 
-ReportFuncCall::ReportFuncCall(Instruction *Inst) : Inst(Inst) {
+const DebugLoc &ReportLoopBound::getDebugLoc() const {
+  const BasicBlock *BB = L->getHeader();
+  return BB->getTerminator()->getDebugLoc();
+}
+
+bool ReportLoopBound::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkLoopBound;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportFuncCall.
+
+ReportFuncCall::ReportFuncCall(Instruction *Inst)
+    : RejectReason(rrkFuncCall), Inst(Inst) {
   ++BadFuncCallForScop;
 }
 
@@ -166,7 +386,26 @@ std::string ReportFuncCall::getMessage() const {
   return "Call instruction: " + *Inst;
 }
 
-ReportAlias::ReportAlias(AliasSet *AS) : AS(AS) { ++BadAliasForScop; }
+const DebugLoc &ReportFuncCall::getDebugLoc() const {
+  return Inst->getDebugLoc();
+}
+
+std::string ReportFuncCall::getEndUserMessage() const {
+  return "This function call cannot be handeled. "
+         "Try to inline it.";
+}
+
+bool ReportFuncCall::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkFuncCall;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportAlias.
+
+ReportAlias::ReportAlias(Instruction *Inst, AliasSet &AS)
+    : RejectReason(rrkAlias), Inst(Inst), AS(AS) {
+  ++BadAliasForScop;
+}
 
 std::string ReportAlias::formatInvalidAlias(AliasSet &AS) const {
   std::string Message;
@@ -202,33 +441,126 @@ std::string ReportAlias::formatInvalidAlias(AliasSet &AS) const {
   return OS.str();
 }
 
-std::string ReportAlias::getMessage() const { return formatInvalidAlias(*AS); }
+std::string ReportAlias::getMessage() const { return formatInvalidAlias(AS); }
 
-ReportSimpleLoop::ReportSimpleLoop() { ++BadSimpleLoopForScop; }
+const DebugLoc &ReportAlias::getDebugLoc() const { return Inst->getDebugLoc(); }
+
+bool ReportAlias::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkAlias;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportSimpleLoop.
+
+ReportSimpleLoop::ReportSimpleLoop() : RejectReason(rrkSimpleLoop) {
+  ++BadSimpleLoopForScop;
+}
 
 std::string ReportSimpleLoop::getMessage() const {
   return "Loop not in simplify form is invalid!";
 }
 
-ReportOther::ReportOther() { ++BadOtherForScop; }
+bool ReportSimpleLoop::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkSimpleLoop;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportOther.
+
+std::string ReportOther::getMessage() const { return "Unknown reject reason"; }
+
+ReportOther::ReportOther(const RejectReasonKind K) : RejectReason(K) {
+  ++BadOtherForScop;
+}
+
+bool ReportOther::classof(const RejectReason *RR) {
+  return RR->getKind() >= rrkOther && RR->getKind() <= rrkLastOther;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportIntToPtr.
+ReportIntToPtr::ReportIntToPtr(Instruction *BaseValue)
+    : ReportOther(rrkIntToPtr), BaseValue(BaseValue) {}
 
 std::string ReportIntToPtr::getMessage() const {
   return "Find bad intToptr prt: " + *BaseValue;
 }
 
+const DebugLoc &ReportIntToPtr::getDebugLoc() const {
+  return BaseValue->getDebugLoc();
+}
+
+bool ReportIntToPtr::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkIntToPtr;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportAlloca.
+
+ReportAlloca::ReportAlloca(Instruction *Inst)
+    : ReportOther(rrkAlloca), Inst(Inst) {}
+
 std::string ReportAlloca::getMessage() const {
   return "Alloca instruction: " + *Inst;
 }
+
+const DebugLoc &ReportAlloca::getDebugLoc() const {
+  return Inst->getDebugLoc();
+}
+
+bool ReportAlloca::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkAlloca;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportUnknownInst.
+
+ReportUnknownInst::ReportUnknownInst(Instruction *Inst)
+    : ReportOther(rrkUnknownInst), Inst(Inst) {}
 
 std::string ReportUnknownInst::getMessage() const {
   return "Unknown instruction: " + *Inst;
 }
 
+const DebugLoc &ReportUnknownInst::getDebugLoc() const {
+  return Inst->getDebugLoc();
+}
+
+bool ReportUnknownInst::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkUnknownInst;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportPHIinExit.
+
+ReportPHIinExit::ReportPHIinExit(Instruction *Inst)
+    : ReportOther(rrkPHIinExit), Inst(Inst) {}
+
 std::string ReportPHIinExit::getMessage() const {
   return "PHI node in exit BB";
 }
 
+const DebugLoc &ReportPHIinExit::getDebugLoc() const {
+  return Inst->getDebugLoc();
+}
+
+bool ReportPHIinExit::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkPHIinExit;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportEntry.
+ReportEntry::ReportEntry(BasicBlock *BB) : ReportOther(rrkEntry), BB(BB) {}
+
 std::string ReportEntry::getMessage() const {
   return "Region containing entry block of function is invalid!";
+}
+
+const DebugLoc &ReportEntry::getDebugLoc() const {
+  return BB->getTerminator()->getDebugLoc();
+}
+
+bool ReportEntry::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkEntry;
 }
 } // namespace polly

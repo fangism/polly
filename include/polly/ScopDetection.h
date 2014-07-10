@@ -144,7 +144,7 @@ class ScopDetection : public FunctionPass {
   RegionSet ValidRegions;
 
   // Remember a list of errors for every region.
-  mutable std::map<const Region *, RejectLog> RejectLogs;
+  mutable RejectLogsContainer RejectLogs;
 
   // Remember the invalid functions producted by backends;
   typedef std::set<const Function *> FunctionSet;
@@ -317,7 +317,7 @@ public:
   //@{
   typedef std::map<const Region *, RejectLog>::iterator reject_iterator;
   typedef std::map<const Region *, RejectLog>::const_iterator
-  const_reject_iterator;
+      const_reject_iterator;
 
   reject_iterator reject_begin() { return RejectLogs.begin(); }
   reject_iterator reject_end() { return RejectLogs.end(); }
@@ -325,6 +325,23 @@ public:
   const_reject_iterator reject_begin() const { return RejectLogs.begin(); }
   const_reject_iterator reject_end() const { return RejectLogs.end(); }
   //@}
+
+  /// @brief Emit rejection remarks for all smallest invalid regions.
+  ///
+  /// @param F The function to emit remarks for.
+  /// @param R The region to start the region tree traversal for.
+  void emitMissedRemarksForLeaves(const Function &F, const Region *R);
+
+  /// @brief Emit rejection remarks for the parent regions of all valid regions.
+  ///
+  /// Emitting rejection remarks for the parent regions of all valid regions
+  /// may give the end-user clues about how to increase the size of the
+  /// detected Scops.
+  ///
+  /// @param F The function to emit remarks for.
+  /// @param ValidRegions The set of valid regions to emit remarks for.
+  void emitMissedRemarksForValidRegions(const Function &F,
+                                        const RegionSet &ValidRegions);
 
   /// @brief Mark the function as invalid so we will not extract any scop from
   ///        the function.

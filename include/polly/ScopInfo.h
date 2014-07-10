@@ -84,6 +84,18 @@ public:
   /// remain, if no write happens.
   enum AccessType { READ, MUST_WRITE, MAY_WRITE };
 
+  /// @brief Reduction access type
+  ///
+  /// Commutative and associative binary operations suitable for reductions
+  enum ReductionType {
+    RT_NONE, ///< Indicate no reduction at all
+    RT_ADD,  ///< Addition
+    RT_MUL,  ///< Multiplication
+    RT_BOR,  ///< Bitwise Or
+    RT_BXOR, ///< Bitwise XOr
+    RT_BAND, ///< Bitwise And
+  };
+
 private:
   MemoryAccess(const MemoryAccess &) LLVM_DELETED_FUNCTION;
   const MemoryAccess &operator=(const MemoryAccess &) LLVM_DELETED_FUNCTION;
@@ -97,7 +109,7 @@ private:
   void setBaseName();
   ScopStmt *Statement;
 
-  /// @brief Flag to indicate reduction like accesses
+  /// @brief Reduction type for reduction like accesses, RT_NONE otherwise
   ///
   /// An access is reduction like if it is part of a load-store chain in which
   /// both access the same memory location (use the same LLVM-IR value
@@ -121,12 +133,14 @@ private:
   /// property is only exploited for statement instances that load from and
   /// store to the same data location. Doing so at dependence analysis time
   /// could allow us to handle the above example.
-  bool IsReductionLike = false;
+  ReductionType RedType = RT_NONE;
 
   const Instruction *Inst;
 
   /// Updated access relation read from JSCOP file.
   isl_map *newAccessRelation;
+
+  void assumeNoOutOfBound(const IRAccess &Access);
 
 public:
   // @brief Create a memory access from an access in LLVM-IR.
@@ -149,7 +163,7 @@ public:
   enum AccessType getType() { return Type; }
 
   /// @brief Is this a reduction like access?
-  bool isReductionLike() const { return IsReductionLike; }
+  bool isReductionLike() const { return RedType != RT_NONE; }
 
   /// @brief Is this a read memory access?
   bool isRead() const { return Type == MemoryAccess::READ; }
@@ -164,6 +178,9 @@ public:
   bool isWrite() const { return isMustWrite() || isMayWrite(); }
 
   isl_map *getAccessRelation() const;
+
+  /// @brief Return the space in which the access relation lives in.
+  __isl_give isl_space *getAccessRelationSpace() const;
 
   /// @brief Get an isl string representing this access function.
   std::string getAccessRelationStr() const;
@@ -205,11 +222,14 @@ public:
   /// @brief Get the statement that contains this memory access.
   ScopStmt *getStatement() const { return Statement; }
 
+  /// @brief Get the reduction type of this access
+  ReductionType getReductionType() const { return RedType; }
+
   /// @brief Set the updated access relation read from JSCOP file.
   void setNewAccessRelation(isl_map *newAccessRelation);
 
   /// @brief Mark this a reduction like access
-  void markReductionLike() { IsReductionLike = true; }
+  void markAsReductionLike(ReductionType RT) { RedType = RT; }
 
   /// @brief Align the parameters in the access relation to the scop context
   void realignParams();
@@ -222,6 +242,9 @@ public:
   /// @brief Print the MemoryAccess to stderr.
   void dump() const;
 };
+
+llvm::raw_ostream &operator<<(llvm::raw_ostream &OS,
+                              MemoryAccess::ReductionType RT);
 
 //===----------------------------------------------------------------------===//
 /// @brief Statement of the Scop
@@ -324,7 +347,14 @@ class ScopStmt {
   __isl_give isl_set *buildDomain(TempScop &tempScop, const Region &CurRegion);
   void buildScattering(SmallVectorImpl<unsigned> &Scatter);
   void buildAccesses(TempScop &tempScop, const Region &CurRegion);
-  void checkForReduction();
+
+  /// @brief Detect and mark reductions in the ScopStmt
+  void checkForReductions();
+
+  /// @brief Collect loads which might form a reduction chain with @p StoreMA
+  void
+  collectCandiateReductionLoads(MemoryAccess *StoreMA,
+                                llvm::SmallVectorImpl<MemoryAccess *> &Loads);
   //@}
 
   /// Create the ScopStmt from a BasicBlock.
@@ -516,6 +546,9 @@ class Scop {
   /// @brief Add the bounds of the parameters to the context.
   void addParameterBounds();
 
+  /// @brief Simplify the assumed context.
+  void simplifyAssumedContext();
+
   /// Build the Scop and Statement with precalculated scop information.
   void buildScop(TempScop &TempScop, const Region &CurRegion,
                  // Loops in Scop containing CurRegion
@@ -606,8 +639,26 @@ public:
   /// @return The assumed context of this Scop.
   __isl_give isl_set *getAssumedContext() const;
 
+  /// @brief Add assumptions to assumed context.
+  ///
+  /// The assumptions added will be assumed to hold during the execution of the
+  /// scop. However, as they are generally not statically provable, at code
+  /// generation time run-time checks will be generated that ensure the
+  /// assumptions hold.
+  ///
+  /// WARNING: We currently exploit in simplifyAssumedContext the knowledge
+  ///          that assumptions do not change the set of statement instances
+  ///          executed.
+  ///
+  /// @param Set A set describing relations between parameters that are assumed
+  ///            to hold.
+  void addAssumption(__isl_take isl_set *Set);
+
   /// @brief Get an isl string representing the context.
   std::string getContextStr() const;
+
+  /// @brief Get an isl string representing the assumed context.
+  std::string getAssumedContextStr() const;
 
   /// @name Statements Iterators
   ///

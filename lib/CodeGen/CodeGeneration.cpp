@@ -63,20 +63,20 @@ struct isl_set;
 
 namespace polly {
 static cl::opt<bool>
-OpenMP("enable-polly-openmp", cl::desc("Generate OpenMP parallel code"),
-       cl::value_desc("OpenMP code generation enabled if true"),
-       cl::init(false), cl::ZeroOrMore, cl::cat(PollyCategory));
+    OpenMP("enable-polly-openmp", cl::desc("Generate OpenMP parallel code"),
+           cl::value_desc("OpenMP code generation enabled if true"),
+           cl::init(false), cl::ZeroOrMore, cl::cat(PollyCategory));
 
 #ifdef GPU_CODEGEN
 static cl::opt<bool>
-GPGPU("enable-polly-gpgpu", cl::desc("Generate GPU parallel code"), cl::Hidden,
-      cl::value_desc("GPGPU code generation enabled if true"), cl::init(false),
-      cl::ZeroOrMore, cl::cat(PollyCategory));
+    GPGPU("enable-polly-gpgpu", cl::desc("Generate GPU parallel code"),
+          cl::Hidden, cl::value_desc("GPGPU code generation enabled if true"),
+          cl::init(false), cl::ZeroOrMore, cl::cat(PollyCategory));
 
 static cl::opt<std::string>
-GPUTriple("polly-gpgpu-triple",
-          cl::desc("Target triple for GPU code generation"), cl::Hidden,
-          cl::init(""), cl::cat(PollyCategory));
+    GPUTriple("polly-gpgpu-triple",
+              cl::desc("Target triple for GPU code generation"), cl::Hidden,
+              cl::init(""), cl::cat(PollyCategory));
 #endif /* GPU_CODEGEN */
 
 typedef DenseMap<const char *, Value *> CharMapT;
@@ -536,14 +536,8 @@ public:
     const BasicBlock *BB = S->getBasicBlock();
 
     // Check all the operands of instructions in the basic block.
-    for (BasicBlock::const_iterator BI = BB->begin(), BE = BB->end(); BI != BE;
-         ++BI) {
-      const Instruction &Inst = *BI;
-      for (Instruction::const_op_iterator II = Inst.op_begin(),
-                                          IE = Inst.op_end();
-           II != IE; ++II) {
-        Value *SrcVal = *II;
-
+    for (const Instruction &Inst : *BB) {
+      for (Value *SrcVal : Inst.operands()) {
         if (Instruction *OpInst = dyn_cast<Instruction>(SrcVal))
           if (S->getParent()->getRegion().contains(OpInst))
             continue;

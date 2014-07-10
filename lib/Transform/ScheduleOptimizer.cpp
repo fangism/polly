@@ -41,49 +41,47 @@ namespace polly {
 bool DisablePollyTiling;
 }
 static cl::opt<bool, true>
-DisableTiling("polly-no-tiling", cl::desc("Disable tiling in the scheduler"),
-              cl::location(polly::DisablePollyTiling), cl::init(false),
-              cl::ZeroOrMore, cl::cat(PollyCategory));
+    DisableTiling("polly-no-tiling",
+                  cl::desc("Disable tiling in the scheduler"),
+                  cl::location(polly::DisablePollyTiling), cl::init(false),
+                  cl::ZeroOrMore, cl::cat(PollyCategory));
 
 static cl::opt<std::string>
-OptimizeDeps("polly-opt-optimize-only",
-             cl::desc("Only a certain kind of dependences (all/raw)"),
-             cl::Hidden, cl::init("all"), cl::ZeroOrMore,
-             cl::cat(PollyCategory));
+    OptimizeDeps("polly-opt-optimize-only",
+                 cl::desc("Only a certain kind of dependences (all/raw)"),
+                 cl::Hidden, cl::init("all"), cl::ZeroOrMore,
+                 cl::cat(PollyCategory));
 
 static cl::opt<std::string>
-SimplifyDeps("polly-opt-simplify-deps",
-             cl::desc("Dependences should be simplified (yes/no)"), cl::Hidden,
-             cl::init("yes"), cl::ZeroOrMore, cl::cat(PollyCategory));
+    SimplifyDeps("polly-opt-simplify-deps",
+                 cl::desc("Dependences should be simplified (yes/no)"),
+                 cl::Hidden, cl::init("yes"), cl::ZeroOrMore,
+                 cl::cat(PollyCategory));
 
-static cl::opt<int>
-MaxConstantTerm("polly-opt-max-constant-term",
-                cl::desc("The maximal constant term allowed (-1 is unlimited)"),
-                cl::Hidden, cl::init(20), cl::ZeroOrMore,
-                cl::cat(PollyCategory));
+static cl::opt<int> MaxConstantTerm(
+    "polly-opt-max-constant-term",
+    cl::desc("The maximal constant term allowed (-1 is unlimited)"), cl::Hidden,
+    cl::init(20), cl::ZeroOrMore, cl::cat(PollyCategory));
 
-static cl::opt<int>
-MaxCoefficient("polly-opt-max-coefficient",
-               cl::desc("The maximal coefficient allowed (-1 is unlimited)"),
-               cl::Hidden, cl::init(20), cl::ZeroOrMore,
-               cl::cat(PollyCategory));
+static cl::opt<int> MaxCoefficient(
+    "polly-opt-max-coefficient",
+    cl::desc("The maximal coefficient allowed (-1 is unlimited)"), cl::Hidden,
+    cl::init(20), cl::ZeroOrMore, cl::cat(PollyCategory));
 
-static cl::opt<std::string>
-FusionStrategy("polly-opt-fusion",
-               cl::desc("The fusion strategy to choose (min/max)"), cl::Hidden,
-               cl::init("min"), cl::ZeroOrMore, cl::cat(PollyCategory));
+static cl::opt<std::string> FusionStrategy(
+    "polly-opt-fusion", cl::desc("The fusion strategy to choose (min/max)"),
+    cl::Hidden, cl::init("min"), cl::ZeroOrMore, cl::cat(PollyCategory));
 
 static cl::opt<std::string>
-MaximizeBandDepth("polly-opt-maximize-bands",
-                  cl::desc("Maximize the band depth (yes/no)"), cl::Hidden,
-                  cl::init("yes"), cl::ZeroOrMore, cl::cat(PollyCategory));
+    MaximizeBandDepth("polly-opt-maximize-bands",
+                      cl::desc("Maximize the band depth (yes/no)"), cl::Hidden,
+                      cl::init("yes"), cl::ZeroOrMore, cl::cat(PollyCategory));
 
-static cl::opt<int>
-DefaultTileSize("polly-default-tile-size",
-                cl::desc("The default tile size (if not enough were provided by"
-                         " --polly-tile-sizes)"),
-                cl::Hidden, cl::init(32), cl::ZeroOrMore,
-                cl::cat(PollyCategory));
+static cl::opt<int> DefaultTileSize(
+    "polly-default-tile-size",
+    cl::desc("The default tile size (if not enough were provided by"
+             " --polly-tile-sizes)"),
+    cl::Hidden, cl::init(32), cl::ZeroOrMore, cl::cat(PollyCategory));
 
 static cl::list<int> TileSizes("polly-tile-sizes",
                                cl::desc("A tile size"
@@ -209,8 +207,7 @@ private:
 char IslScheduleOptimizer::ID = 0;
 
 void IslScheduleOptimizer::extendScattering(Scop &S, unsigned NewDimensions) {
-  for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI) {
-    ScopStmt *Stmt = *SI;
+  for (ScopStmt *Stmt : S) {
     unsigned OldDimensions = Stmt->getNumScattering();
     isl_space *Space;
     isl_map *Map, *New;
@@ -562,8 +559,7 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
 
   isl_union_map *ScheduleMap = getScheduleMap(Schedule);
 
-  for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI) {
-    ScopStmt *Stmt = *SI;
+  for (ScopStmt *Stmt : S) {
     isl_map *StmtSchedule;
     isl_set *Domain = Stmt->getDomain();
     isl_union_map *StmtBand;
@@ -585,8 +581,8 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
 
   unsigned MaxScatDims = 0;
 
-  for (Scop::iterator SI = S.begin(), SE = S.end(); SI != SE; ++SI)
-    MaxScatDims = std::max((*SI)->getNumScattering(), MaxScatDims);
+  for (ScopStmt *Stmt : S)
+    MaxScatDims = std::max(Stmt->getNumScattering(), MaxScatDims);
 
   extendScattering(S, MaxScatDims);
   return false;
