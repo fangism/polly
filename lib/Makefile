@@ -39,6 +39,7 @@ POLLY_SCOPLIB_FILES= Exchange/ScopLib.cpp \
 endif
 
 ISL_CODEGEN_FILES= CodeGen/IslAst.cpp \
+                   CodeGen/IslExprBuilder.cpp \
                    CodeGen/IslCodeGeneration.cpp
 
 POLLY_JSON_FILES= JSON/json_reader.cpp \
@@ -61,6 +62,7 @@ SOURCES= Polly.cpp \
 	 CodeGen/LoopGenerators.cpp \
 	 CodeGen/IRBuilder.cpp \
 	 CodeGen/Utils.cpp \
+	 CodeGen/RuntimeDebugBuilder.cpp \
 	 Exchange/JSONExporter.cpp \
 	 Transform/Canonicalization.cpp \
 	 Transform/CodePreparation.cpp \

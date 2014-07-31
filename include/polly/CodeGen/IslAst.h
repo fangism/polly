@@ -40,31 +40,47 @@ namespace polly {
 class Scop;
 class IslAst;
 
-// Information about an ast node.
-struct IslAstUserPayload {
-  struct isl_ast_build *Context;
-  // The node is the outermost parallel loop.
-  int IsOutermostParallel;
-
-  // The node is the innermost parallel loop.
-  int IsInnermostParallel;
-
-  // The node is only parallel because of reductions
-  bool IsReductionParallel;
-};
-
 class IslAstInfo : public ScopPass {
+public:
+  /// @brief Payload information used to annoate an ast node.
+  struct IslAstUserPayload {
+    /// @brief Construct and initialize the payload.
+    IslAstUserPayload()
+        : IsInnermostParallel(false), IsOutermostParallel(false),
+          IsReductionParallel(false), Build(nullptr) {}
+
+    /// @brief Cleanup all isl structs on destruction.
+    ~IslAstUserPayload();
+
+    /// @brief Flag to mark innermost parallel loops.
+    bool IsInnermostParallel;
+
+    /// @brief Flag to mark outermost parallel loops.
+    bool IsOutermostParallel;
+
+    /// @brief Flag to mark reduction parallel loops.
+    bool IsReductionParallel;
+
+    /// @brief The build environment at the time this node was constructed.
+    isl_ast_build *Build;
+  };
+
+private:
   Scop *S;
   IslAst *Ast;
 
 public:
   static char ID;
-  IslAstInfo() : ScopPass(ID), Ast(NULL) {}
+  IslAstInfo() : ScopPass(ID), S(nullptr), Ast(nullptr) {}
 
-  /// Print a source code representation of the program.
-  void pprint(llvm::raw_ostream &OS);
+  /// @brief Build the AST for the given SCoP @p S.
+  bool runOnScop(Scop &S);
 
-  isl_ast_node *getAst();
+  /// @brief Print a source code representation of the program.
+  void printScop(llvm::raw_ostream &OS) const;
+
+  /// @brief Return a copy of the AST root node.
+  __isl_give isl_ast_node *getAst() const;
 
   /// @brief Get the run conditon.
   ///
@@ -72,10 +88,7 @@ public:
   /// assumptions that have been taken hold. If the run condition evaluates to
   /// zero/false some assumptions do not hold and the original code needs to
   /// be executed.
-  __isl_give isl_ast_expr *getRunCondition();
-
-  bool runOnScop(Scop &S);
-  void printScop(llvm::raw_ostream &OS) const;
+  __isl_give isl_ast_expr *getRunCondition() const;
 
   /// @name Extract information attached to an isl ast (for) node.
   ///
@@ -95,6 +108,9 @@ public:
 
   /// @brief Is this loop a reduction parallel loop?
   static bool isReductionParallel(__isl_keep isl_ast_node *Node);
+
+  /// @brief Get the nodes schedule or a nullptr if not available.
+  static __isl_give isl_union_map *getSchedule(__isl_keep isl_ast_node *Node);
 
   ///}
 

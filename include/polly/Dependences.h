@@ -77,25 +77,23 @@ public:
 
   Dependences();
 
-  // @brief Check if a new scattering is valid.
-  //
-  // @param NewScattering The new scatterings
-  //
-  // @return bool True if the new scattering is valid, false it it reverses
-  //              dependences.
+  /// @brief Check if a new scattering is valid.
+  ///
+  /// @param NewScattering The new scatterings
+  ///
+  /// @return bool True if the new scattering is valid, false it it reverses
+  ///              dependences.
   bool isValidScattering(StatementToIslMapTy *NewScatterings);
 
-  /// @brief Check if a dimension of the Scop can be executed in parallel.
+  /// @brief Check if a partial schedule is parallel wrt to @p Deps.
   ///
-  /// @param LoopDomain The subset of the scattering space that is executed in
-  ///                   parallel.
-  /// @param ParallelDimension The scattering dimension that is being executed
-  ///                          in parallel.
+  /// @param Schedule The subset of the scattering space that we want to check.
+  /// @param Deps     The dependences @p Schedule needs to respect.
   ///
-  /// @return bool Returns true, if executing parallelDimension in parallel is
-  ///              valid for the scattering domain subset given.
-  bool isParallelDimension(__isl_take isl_set *LoopDomain,
-                           unsigned ParallelDimension);
+  /// @return Returns true, if executing parallel the outermost dimension of
+  ///         @p Schedule is valid according to the dependences @p Deps.
+  bool isParallel(__isl_keep isl_union_map *Schedule,
+                  __isl_take isl_union_map *Deps);
 
   /// @brief Get the dependences in this Scop.
   ///
@@ -113,7 +111,7 @@ public:
   virtual void getAnalysisUsage(AnalysisUsage &AU) const;
 
 private:
-  // The different kinds of dependences we calculate.
+  /// @brief The different kinds of dependences we calculate.
   isl_union_map *RAW;
   isl_union_map *WAR;
   isl_union_map *WAW;
@@ -132,7 +130,7 @@ private:
   /// @brief Calculate and add at the privatization dependences
   void addPrivatizationDependences();
 
-  // @brief Calculate the dependences for a certain SCoP.
+  /// @brief Calculate the dependences for a certain SCoP.
   void calculateDependences(Scop &S);
 };
 
