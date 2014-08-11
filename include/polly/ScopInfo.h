@@ -136,7 +136,8 @@ private:
   /// could allow us to handle the above example.
   ReductionType RedType = RT_NONE;
 
-  const Instruction *Inst;
+  /// @brief The access instruction of this memory access.
+  Instruction *Inst;
 
   /// Updated access relation read from JSCOP file.
   isl_map *newAccessRelation;
@@ -149,7 +150,7 @@ public:
   /// @param Access     The memory access.
   /// @param Statement  The statement that contains the access.
   /// @param SE         The ScalarEvolution analysis.
-  MemoryAccess(const IRAccess &Access, const Instruction *AccInst,
+  MemoryAccess(const IRAccess &Access, Instruction *AccInst,
                ScopStmt *Statement);
 
   ~MemoryAccess();
@@ -186,9 +187,16 @@ public:
   /// @brief Get the base array isl_id for this access.
   __isl_give isl_id *getArrayId() const;
 
+  /// @brief Return a string representation of the accesse's reduction type.
+  const std::string getReductionOperatorStr() const;
+
+  /// @brief Return a string representation of the reduction type @p RT.
+  static const std::string getReductionOperatorStr(ReductionType RT);
+
   const std::string &getBaseName() const { return BaseName; }
 
-  const Instruction *getAccessInstruction() const { return Inst; }
+  /// @brief Return the access instruction of this memory access.
+  Instruction *getAccessInstruction() const { return Inst; }
 
   /// @brief Get the new access function imported from JSCOP file
   isl_map *getNewAccessRelation() const;
@@ -225,7 +233,7 @@ public:
   ReductionType getReductionType() const { return RedType; }
 
   /// @brief Set the updated access relation read from JSCOP file.
-  void setNewAccessRelation(isl_map *newAccessRelation);
+  void setNewAccessRelation(__isl_take isl_map *newAccessRelation);
 
   /// @brief Mark this a reduction like access
   void markAsReductionLike(ReductionType RT) { RedType = RT; }

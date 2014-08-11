@@ -34,23 +34,31 @@ class raw_ostream;
 struct isl_ast_node;
 struct isl_ast_expr;
 struct isl_ast_build;
+struct isl_union_map;
 struct isl_pw_multi_aff;
 
 namespace polly {
 class Scop;
 class IslAst;
+class MemoryAccess;
 
 class IslAstInfo : public ScopPass {
 public:
-  /// @brief Payload information used to annoate an ast node.
+  using MemoryAccessSet = SmallPtrSet<MemoryAccess *, 4>;
+
+  /// @brief Payload information used to annotate an AST node.
   struct IslAstUserPayload {
     /// @brief Construct and initialize the payload.
     IslAstUserPayload()
-        : IsInnermostParallel(false), IsOutermostParallel(false),
-          IsReductionParallel(false), Build(nullptr) {}
+        : IsInnermost(false), IsInnermostParallel(false),
+          IsOutermostParallel(false), IsReductionParallel(false),
+          Build(nullptr) {}
 
     /// @brief Cleanup all isl structs on destruction.
     ~IslAstUserPayload();
+
+    /// @brief Flag to mark innermost loops.
+    bool IsInnermost;
 
     /// @brief Flag to mark innermost parallel loops.
     bool IsInnermostParallel;
@@ -58,11 +66,14 @@ public:
     /// @brief Flag to mark outermost parallel loops.
     bool IsOutermostParallel;
 
-    /// @brief Flag to mark reduction parallel loops.
+    /// @brief Flag to mark parallel loops which break reductions.
     bool IsReductionParallel;
 
     /// @brief The build environment at the time this node was constructed.
     isl_ast_build *Build;
+
+    /// @brief Set of accesses which break reduction dependences.
+    MemoryAccessSet BrokenReductions;
   };
 
 private:
@@ -82,7 +93,7 @@ public:
   /// @brief Return a copy of the AST root node.
   __isl_give isl_ast_node *getAst() const;
 
-  /// @brief Get the run conditon.
+  /// @brief Get the run condition.
   ///
   /// Only if the run condition evaluates at run-time to a non-zero value, the
   /// assumptions that have been taken hold. If the run condition evaluates to
@@ -97,11 +108,14 @@ public:
   /// @brief Get the complete payload attached to @p Node.
   static IslAstUserPayload *getNodePayload(__isl_keep isl_ast_node *Node);
 
+  /// @brief Is this loop an innermost loop?
+  static bool isInnermost(__isl_keep isl_ast_node *Node);
+
   /// @brief Is this loop a parallel loop?
   static bool isParallel(__isl_keep isl_ast_node *Node);
 
-  /// @brief Is this loop an outer parallel loop?
-  static bool isOuterParallel(__isl_keep isl_ast_node *Node);
+  /// @brief Is this loop an outermost parallel loop?
+  static bool isOutermostParallel(__isl_keep isl_ast_node *Node);
 
   /// @brief Is this loop an innermost parallel loop?
   static bool isInnermostParallel(__isl_keep isl_ast_node *Node);
@@ -111,6 +125,12 @@ public:
 
   /// @brief Get the nodes schedule or a nullptr if not available.
   static __isl_give isl_union_map *getSchedule(__isl_keep isl_ast_node *Node);
+
+  /// @brief Get the nodes broken reductions or a nullptr if not available.
+  static MemoryAccessSet *getBrokenReductions(__isl_keep isl_ast_node *Node);
+
+  /// @brief Get the nodes build context or a nullptr if not available.
+  static __isl_give isl_ast_build *getBuild(__isl_keep isl_ast_node *Node);
 
   ///}
 

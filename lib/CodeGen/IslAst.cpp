@@ -100,43 +100,58 @@ struct AstBuildUserInfo {
   isl_id *LastForNodeId;
 };
 
-// Print a loop annotated with OpenMP or vector pragmas.
-static __isl_give isl_printer *
-printParallelFor(__isl_keep isl_ast_node *Node, __isl_take isl_printer *Printer,
-                 __isl_take isl_ast_print_options *PrintOptions,
-                 IslAstUserPayload *Info) {
-  if (Info) {
-    if (Info->IsInnermostParallel) {
-      Printer = isl_printer_start_line(Printer);
-      Printer = isl_printer_print_str(Printer, "#pragma simd");
-      if (Info->IsReductionParallel)
-        Printer = isl_printer_print_str(Printer, " reduction");
-      Printer = isl_printer_end_line(Printer);
-    }
-    if (Info->IsOutermostParallel) {
-      Printer = isl_printer_start_line(Printer);
-      Printer = isl_printer_print_str(Printer, "#pragma omp parallel for");
-      if (Info->IsReductionParallel)
-        Printer = isl_printer_print_str(Printer, " reduction");
-      Printer = isl_printer_end_line(Printer);
-    }
-  }
-  return isl_ast_node_for_print(Node, Printer, PrintOptions);
+/// @brief Print a string @p str in a single line using @p Printer.
+static isl_printer *printLine(__isl_take isl_printer *Printer,
+                              const std::string &str) {
+  Printer = isl_printer_start_line(Printer);
+  Printer = isl_printer_print_str(Printer, str.c_str());
+  return isl_printer_end_line(Printer);
 }
 
-// Print an isl_ast_for.
-static __isl_give isl_printer *
-printFor(__isl_take isl_printer *Printer,
-         __isl_take isl_ast_print_options *PrintOptions,
-         __isl_keep isl_ast_node *Node, void *User) {
-  isl_id *Id = isl_ast_node_get_annotation(Node);
-  if (!Id)
-    return isl_ast_node_for_print(Node, Printer, PrintOptions);
+/// @brief Return all broken reductions as a string of clauses (OpenMP style).
+static const std::string getBrokenReductionsStr(__isl_keep isl_ast_node *Node) {
+  IslAstInfo::MemoryAccessSet *BrokenReductions;
+  std::string str;
 
-  IslAstUserPayload *Info = (IslAstUserPayload *)isl_id_get_user(Id);
-  Printer = printParallelFor(Node, Printer, PrintOptions, Info);
-  isl_id_free(Id);
-  return Printer;
+  BrokenReductions = IslAstInfo::getBrokenReductions(Node);
+  if (!BrokenReductions || BrokenReductions->empty())
+    return "";
+
+  // Map each type of reduction to a comma separated list of the base addresses.
+  std::map<MemoryAccess::ReductionType, std::string> Clauses;
+  for (MemoryAccess *MA : *BrokenReductions)
+    if (MA->isWrite())
+      Clauses[MA->getReductionType()] +=
+          ", " + MA->getBaseAddr()->getName().str();
+
+  // Now print the reductions sorted by type. Each type will cause a clause
+  // like:  reduction (+ : sum0, sum1, sum2)
+  for (const auto &ReductionClause : Clauses) {
+    str += " reduction (";
+    str += MemoryAccess::getReductionOperatorStr(ReductionClause.first);
+    // Remove the first two symbols (", ") to make the output look pretty.
+    str += " : " + ReductionClause.second.substr(2) + ")";
+  }
+
+  return str;
+}
+
+/// @brief Callback executed for each for node in the ast in order to print it.
+static isl_printer *cbPrintFor(__isl_take isl_printer *Printer,
+                               __isl_take isl_ast_print_options *Options,
+                               __isl_keep isl_ast_node *Node, void *) {
+
+  const std::string BrokenReductionsStr = getBrokenReductionsStr(Node);
+  const std::string SimdPragmaStr = "#pragma simd";
+  const std::string OmpPragmaStr = "#pragma omp parallel for";
+
+  if (IslAstInfo::isInnermostParallel(Node))
+    Printer = printLine(Printer, SimdPragmaStr + BrokenReductionsStr);
+
+  if (IslAstInfo::isOutermostParallel(Node))
+    Printer = printLine(Printer, OmpPragmaStr + BrokenReductionsStr);
+
+  return isl_ast_node_for_print(Node, Printer, Options);
 }
 
 /// @brief Check if the current scheduling dimension is parallel
@@ -151,7 +166,7 @@ printFor(__isl_take isl_printer *Printer,
 /// (or non-zero) dependence distance on the dimension in question.
 static bool astScheduleDimIsParallel(__isl_keep isl_ast_build *Build,
                                      Dependences *D,
-                                     bool &IsReductionParallel) {
+                                     IslAstUserPayload *NodeInfo) {
   if (!D->hasValidDependences())
     return false;
 
@@ -163,24 +178,23 @@ static bool astScheduleDimIsParallel(__isl_keep isl_ast_build *Build,
 
   isl_union_map *RedDeps = D->getDependences(Dependences::TYPE_TC_RED);
   if (!D->isParallel(Schedule, RedDeps))
-    IsReductionParallel = true;
+    NodeInfo->IsReductionParallel = true;
+
+  if (!NodeInfo->IsReductionParallel && !isl_union_map_free(Schedule))
+    return true;
+
+  // Annotate reduction parallel nodes with the memory accesses which caused the
+  // reduction dependences parallel execution of the node conflicts with.
+  for (const auto &MaRedPair : D->getReductionDependences()) {
+    if (!MaRedPair.second)
+      continue;
+    RedDeps = isl_union_map_from_map(isl_map_copy(MaRedPair.second));
+    if (!D->isParallel(Schedule, RedDeps))
+      NodeInfo->BrokenReductions.insert(MaRedPair.first);
+  }
 
   isl_union_map_free(Schedule);
   return true;
-}
-
-// Mark a for node openmp parallel, if it is the outermost parallel for node.
-static void markOpenmpParallel(__isl_keep isl_ast_build *Build,
-                               AstBuildUserInfo *BuildInfo,
-                               IslAstUserPayload *NodeInfo) {
-  if (BuildInfo->InParallelFor)
-    return;
-
-  if (astScheduleDimIsParallel(Build, BuildInfo->Deps,
-                               NodeInfo->IsReductionParallel)) {
-    BuildInfo->InParallelFor = 1;
-    NodeInfo->IsOutermostParallel = 1;
-  }
 }
 
 // This method is executed before the construction of a for node. It creates
@@ -193,12 +207,15 @@ static void markOpenmpParallel(__isl_keep isl_ast_build *Build,
 static __isl_give isl_id *astBuildBeforeFor(__isl_keep isl_ast_build *Build,
                                             void *User) {
   AstBuildUserInfo *BuildInfo = (AstBuildUserInfo *)User;
-  IslAstUserPayload *NodeInfo = new IslAstUserPayload();
-  isl_id *Id = isl_id_alloc(isl_ast_build_get_ctx(Build), "", NodeInfo);
+  IslAstUserPayload *Payload = new IslAstUserPayload();
+  isl_id *Id = isl_id_alloc(isl_ast_build_get_ctx(Build), "", Payload);
   Id = isl_id_set_free_user(Id, freeIslAstUserPayload);
   BuildInfo->LastForNodeId = Id;
 
-  markOpenmpParallel(Build, BuildInfo, NodeInfo);
+  // Test for parallelism only if we are not already inside a parallel loop
+  if (!BuildInfo->InParallelFor)
+    BuildInfo->InParallelFor = Payload->IsOutermostParallel =
+        astScheduleDimIsParallel(Build, BuildInfo->Deps, Payload);
 
   return Id;
 }
@@ -214,23 +231,26 @@ static __isl_give isl_ast_node *
 astBuildAfterFor(__isl_take isl_ast_node *Node, __isl_keep isl_ast_build *Build,
                  void *User) {
   isl_id *Id = isl_ast_node_get_annotation(Node);
-  if (!Id)
-    return Node;
-  IslAstUserPayload *Info = (IslAstUserPayload *)isl_id_get_user(Id);
+  assert(Id && "Post order visit assumes annotated for nodes");
+  IslAstUserPayload *Payload = (IslAstUserPayload *)isl_id_get_user(Id);
+  assert(Payload && "Post order visit assumes annotated for nodes");
+
   AstBuildUserInfo *BuildInfo = (AstBuildUserInfo *)User;
+  assert(!Payload->Build && "Build environment already set");
+  Payload->Build = isl_ast_build_copy(Build);
+  Payload->IsInnermost = (Id == BuildInfo->LastForNodeId);
 
-  bool IsInnermost = (Id == BuildInfo->LastForNodeId);
-
-  if (Info) {
-    if (Info->IsOutermostParallel)
-      BuildInfo->InParallelFor = 0;
-    if (IsInnermost)
-      if (astScheduleDimIsParallel(Build, BuildInfo->Deps,
-                                   Info->IsReductionParallel))
-        Info->IsInnermostParallel = 1;
-    if (!Info->Build)
-      Info->Build = isl_ast_build_copy(Build);
-  }
+  // Innermost loops that are surrounded by parallel loops have not yet been
+  // tested for parallelism. Test them here to ensure we check all innermost
+  // loops for parallelism.
+  if (Payload->IsInnermost && BuildInfo->InParallelFor) {
+    if (Payload->IsOutermostParallel)
+      Payload->IsInnermostParallel = true;
+    else
+      Payload->IsInnermostParallel =
+          astScheduleDimIsParallel(Build, BuildInfo->Deps, Payload);
+  } else if (Payload->IsOutermostParallel)
+    BuildInfo->InParallelFor = false;
 
   isl_id_free(Id);
   return Node;
@@ -240,11 +260,12 @@ static __isl_give isl_ast_node *AtEachDomain(__isl_take isl_ast_node *Node,
                                              __isl_keep isl_ast_build *Build,
                                              void *User) {
   assert(!isl_ast_node_get_annotation(Node) && "Node already annotated");
-  IslAstUserPayload *NodeInfo = new IslAstUserPayload();
-  isl_id *Id = isl_id_alloc(isl_ast_build_get_ctx(Build), "", NodeInfo);
+
+  IslAstUserPayload *Payload = new IslAstUserPayload();
+  isl_id *Id = isl_id_alloc(isl_ast_build_get_ctx(Build), "", Payload);
   Id = isl_id_set_free_user(Id, freeIslAstUserPayload);
 
-  NodeInfo->Build = isl_ast_build_copy(Build);
+  Payload->Build = isl_ast_build_copy(Build);
 
   return isl_ast_node_set_annotation(Node, Id);
 }
@@ -356,21 +377,24 @@ IslAstUserPayload *IslAstInfo::getNodePayload(__isl_keep isl_ast_node *Node) {
   return Payload;
 }
 
+bool IslAstInfo::isInnermost(__isl_keep isl_ast_node *Node) {
+  IslAstUserPayload *Payload = getNodePayload(Node);
+  return Payload && Payload->IsInnermost;
+}
+
 bool IslAstInfo::isParallel(__isl_keep isl_ast_node *Node) {
-  return (isInnermostParallel(Node) || isOuterParallel(Node)) &&
-         !isReductionParallel(Node);
+  return IslAstInfo::isInnermostParallel(Node) ||
+         IslAstInfo::isOutermostParallel(Node);
 }
 
 bool IslAstInfo::isInnermostParallel(__isl_keep isl_ast_node *Node) {
   IslAstUserPayload *Payload = getNodePayload(Node);
-  return Payload && Payload->IsInnermostParallel &&
-         !Payload->IsReductionParallel;
+  return Payload && Payload->IsInnermostParallel;
 }
 
-bool IslAstInfo::isOuterParallel(__isl_keep isl_ast_node *Node) {
+bool IslAstInfo::isOutermostParallel(__isl_keep isl_ast_node *Node) {
   IslAstUserPayload *Payload = getNodePayload(Node);
-  return Payload && Payload->IsOutermostParallel &&
-         !Payload->IsReductionParallel;
+  return Payload && Payload->IsOutermostParallel;
 }
 
 bool IslAstInfo::isReductionParallel(__isl_keep isl_ast_node *Node) {
@@ -383,6 +407,17 @@ isl_union_map *IslAstInfo::getSchedule(__isl_keep isl_ast_node *Node) {
   return Payload ? isl_ast_build_get_schedule(Payload->Build) : nullptr;
 }
 
+IslAstInfo::MemoryAccessSet *
+IslAstInfo::getBrokenReductions(__isl_keep isl_ast_node *Node) {
+  IslAstUserPayload *Payload = getNodePayload(Node);
+  return Payload ? &Payload->BrokenReductions : nullptr;
+}
+
+isl_ast_build *IslAstInfo::getBuild(__isl_keep isl_ast_node *Node) {
+  IslAstUserPayload *Payload = getNodePayload(Node);
+  return Payload ? Payload->Build : nullptr;
+}
+
 void IslAstInfo::printScop(raw_ostream &OS) const {
   isl_ast_print_options *Options;
   isl_ast_node *RootNode = getAst();
@@ -391,7 +426,7 @@ void IslAstInfo::printScop(raw_ostream &OS) const {
 
   Scop &S = getCurScop();
   Options = isl_ast_print_options_alloc(S.getIslCtx());
-  Options = isl_ast_print_options_set_print_for(Options, printFor, nullptr);
+  Options = isl_ast_print_options_set_print_for(Options, cbPrintFor, nullptr);
 
   isl_printer *P = isl_printer_to_str(S.getIslCtx());
   P = isl_printer_print_ast_expr(P, RunCondition);

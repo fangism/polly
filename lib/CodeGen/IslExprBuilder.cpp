@@ -91,6 +91,55 @@ Value *IslExprBuilder::createOpNAry(__isl_take isl_ast_expr *Expr) {
   return V;
 }
 
+Value *IslExprBuilder::createOpAccess(isl_ast_expr *Expr) {
+  assert(isl_ast_expr_get_type(Expr) == isl_ast_expr_op &&
+         "isl ast expression not of type isl_ast_op");
+  assert(isl_ast_expr_get_op_type(Expr) == isl_ast_op_access &&
+         "not an access isl ast expression");
+  assert(isl_ast_expr_get_op_n_arg(Expr) >= 2 &&
+         "We need at least two operands to create a member access.");
+
+  // TODO: Support for multi-dimensional array.
+  assert(isl_ast_expr_get_op_n_arg(Expr) == 2 &&
+         "Multidimensional access functions are not supported yet");
+
+  Value *Base, *IndexOp, *Zero, *Access;
+  SmallVector<Value *, 4> Indices;
+  Type *PtrElTy;
+
+  Base = create(isl_ast_expr_get_op_arg(Expr, 0));
+  assert(Base->getType()->isPointerTy() && "Access base should be a pointer");
+
+  IndexOp = create(isl_ast_expr_get_op_arg(Expr, 1));
+  assert(IndexOp->getType()->isIntegerTy() &&
+         "Access index should be an integer");
+  Zero = ConstantInt::getNullValue(IndexOp->getType());
+
+  // If base is a array type like,
+  //   int A[N][M][K];
+  // we have to adjust the GEP. The easiest way is to transform accesses like,
+  //   A[i][j][k]
+  // into equivalent ones like,
+  //   A[0][0][ i*N*M + j*M + k]
+  // because SCEV already folded the "peudo dimensions" into one. Thus our index
+  // operand will be 'i*N*M + j*M + k' anyway.
+  PtrElTy = Base->getType()->getPointerElementType();
+  while (PtrElTy->isArrayTy()) {
+    Indices.push_back(Zero);
+    PtrElTy = PtrElTy->getArrayElementType();
+  }
+
+  Indices.push_back(IndexOp);
+  assert((PtrElTy->isIntOrIntVectorTy() || PtrElTy->isFPOrFPVectorTy()) &&
+         "We do not yet change the type of the access base during code "
+         "generation.");
+
+  Access = Builder.CreateGEP(Base, Indices, "polly.access." + Base->getName());
+
+  isl_ast_expr_free(Expr);
+  return Access;
+}
+
 Value *IslExprBuilder::createOpBin(__isl_take isl_ast_expr *Expr) {
   Value *LHS, *RHS, *Res;
   Type *MaxType;
@@ -303,8 +352,9 @@ Value *IslExprBuilder::createOp(__isl_take isl_ast_expr *Expr) {
   case isl_ast_op_or_else:
   case isl_ast_op_call:
   case isl_ast_op_member:
-  case isl_ast_op_access:
     llvm_unreachable("Unsupported isl ast expression");
+  case isl_ast_op_access:
+    return createOpAccess(Expr);
   case isl_ast_op_max:
   case isl_ast_op_min:
     return createOpNAry(Expr);
