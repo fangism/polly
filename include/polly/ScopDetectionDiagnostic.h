@@ -174,7 +174,13 @@ public:
   iterator begin() const { return ErrorReports.begin(); }
   iterator end() const { return ErrorReports.end(); }
   size_t size() const { return ErrorReports.size(); }
+
+  /// @brief Returns true, if we store at least one error.
+  ///
+  /// @return true, if we store at least one error.
   bool hasErrors() const { return size() > 0; }
+
+  void print(raw_ostream &OS, int level = 0) const;
 
   const Region *region() const { return R; }
   void report(RejectReasonPtr Reject) { ErrorReports.push_back(Reject); }
@@ -194,9 +200,9 @@ public:
   const_iterator begin() const { return Logs.begin(); }
   const_iterator end() const { return Logs.end(); }
 
-  void insert(std::pair<const Region *, RejectLog> New) {
-    auto Result = Logs.insert(New);
-    assert(Result.second && "Tried to replace an element in the log!");
+  std::pair<iterator, bool>
+  insert(const std::pair<const Region *, RejectLog> &New) {
+    return Logs.insert(New);
   }
 
   std::map<const Region *, RejectLog>::mapped_type at(const Region *R) {
@@ -214,7 +220,11 @@ public:
   }
 
   bool hasErrors(const Region *R) const {
-    return (Logs.count(R) && Logs.at(R).size() > 0);
+    if (!Logs.count(R))
+      return false;
+
+    RejectLog Log = Logs.at(R);
+    return Log.hasErrors();
   }
 
   bool hasErrors(Region *R) const { return hasErrors((const Region *)R); }
@@ -481,10 +491,14 @@ class ReportNonAffineAccess : public ReportAffFunc {
   // The non-affine access function.
   const SCEV *AccessFunction;
 
+  // The base pointer of the memory access.
+  const Value *BaseValue;
+
 public:
-  ReportNonAffineAccess(const SCEV *AccessFunction, const Instruction *Inst)
-      : ReportAffFunc(rrkNonAffineAccess, Inst),
-        AccessFunction(AccessFunction) {}
+  ReportNonAffineAccess(const SCEV *AccessFunction, const Instruction *Inst,
+                        const Value *V)
+      : ReportAffFunc(rrkNonAffineAccess, Inst), AccessFunction(AccessFunction),
+        BaseValue(V) {}
 
   const SCEV *get() { return AccessFunction; }
 
@@ -496,6 +510,7 @@ public:
   /// @name RejectReason interface
   //@{
   virtual std::string getMessage() const override;
+  virtual std::string getEndUserMessage() const override;
   //@}
 };
 
@@ -612,6 +627,9 @@ class ReportLoopBound : public RejectReason {
   // The non-affine loop bound.
   const SCEV *LoopCount;
 
+  // A copy of the offending loop's debug location.
+  const DebugLoc Loc;
+
 public:
   ReportLoopBound(Loop *L, const SCEV *LoopCount);
 
@@ -626,6 +644,7 @@ public:
   //@{
   virtual std::string getMessage() const override;
   virtual const DebugLoc &getDebugLoc() const override;
+  virtual std::string getEndUserMessage() const override;
   //@}
 };
 
@@ -657,19 +676,26 @@ public:
 /// @brief Captures errors with aliasing.
 class ReportAlias : public RejectReason {
   //===--------------------------------------------------------------------===//
+public:
+  typedef std::vector<const llvm::Value *> PointerSnapshotTy;
 
+private:
   /// @brief Format an invalid alias set.
   ///
-  /// @param AS The invalid alias set to format.
-  std::string formatInvalidAlias(AliasSet &AS) const;
+  //  @param Prefix A prefix string to put before the list of aliasing pointers.
+  //  @param Suffix A suffix string to put after the list of aliasing pointers.
+  std::string formatInvalidAlias(std::string Prefix = "",
+                                 std::string Suffix = "") const;
 
   Instruction *Inst;
-  AliasSet &AS;
+
+  // A snapshot of the llvm values that took part in the aliasing error.
+  mutable PointerSnapshotTy Pointers;
 
 public:
   ReportAlias(Instruction *Inst, AliasSet &AS);
 
-  AliasSet &getAliasSet() { return AS; }
+  const PointerSnapshotTy &getPointers() const { return Pointers; }
 
   /// @name LLVM-RTTI interface
   //@{
@@ -680,6 +706,7 @@ public:
   //@{
   virtual std::string getMessage() const override;
   virtual const DebugLoc &getDebugLoc() const override;
+  virtual std::string getEndUserMessage() const override;
   //@}
 };
 

@@ -12,7 +12,7 @@ if (NOT DEFINED LLVM_MAIN_SRC_DIR)
   #FileCheck is not install by default, warn the user to Copy FileCheck
   if( NOT EXISTS ${LLVM_INSTALL_ROOT}/bin/FileCheck
       OR NOT EXISTS ${LLVM_INSTALL_ROOT}/bin/not)
-    message(WARNING "FileCheck or not are requred by running regress tests, "
+    message(WARNING "FileCheck or not are required by running regress tests, "
                     "but they are not installed! Please copy it to "
                     "${LLVM_INSTALL_ROOT}/bin.")
   endif(NOT EXISTS ${LLVM_INSTALL_ROOT}/bin/FileCheck
@@ -111,14 +111,6 @@ if (POLLY_ENABLE_GPGPU_CODEGEN)
   set(GPU_CODEGEN TRUE)
 endif(POLLY_ENABLE_GPGPU_CODEGEN)
 
-option(POLLY_ENABLE_SCOPLIB "Enable SCoPLib library for scop import/export" ON)
-if (POLLY_ENABLE_SCOPLIB)
-  FIND_PACKAGE(SCoPLib)
-  if(SCOPLIB_FOUND)
-    set(POLLY_LINK_LIBS ${POLLY_LINK_LIBS} ${SCOPLIB_LIBRARY})
-  endif(SCOPLIB_FOUND)
-endif(POLLY_ENABLE_SCOPLIB)
-
 if (CLOOG_FOUND)
   INCLUDE_DIRECTORIES( ${CLOOG_INCLUDE_DIR} )
 endif(CLOOG_FOUND)
@@ -134,11 +126,6 @@ endif(GMP_FOUND)
 if (CUDALIB_FOUND)
   INCLUDE_DIRECTORIES( ${CUDALIB_INCLUDE_DIR} )
 endif(CUDALIB_FOUND)
-
-if (SCOPLIB_FOUND)
-  INCLUDE_DIRECTORIES( ${SCOPLIB_INCLUDE_DIR} )
-endif(SCOPLIB_FOUND)
-
 
 include_directories(
   BEFORE
