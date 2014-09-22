@@ -91,7 +91,7 @@ Value *IslExprBuilder::createOpNAry(__isl_take isl_ast_expr *Expr) {
   return V;
 }
 
-Value *IslExprBuilder::createOpAccess(isl_ast_expr *Expr) {
+Value *IslExprBuilder::createAccessAddress(isl_ast_expr *Expr) {
   assert(isl_ast_expr_get_type(Expr) == isl_ast_expr_op &&
          "isl ast expression not of type isl_ast_op");
   assert(isl_ast_expr_get_op_type(Expr) == isl_ast_op_access &&
@@ -130,7 +130,8 @@ Value *IslExprBuilder::createOpAccess(isl_ast_expr *Expr) {
   }
 
   Indices.push_back(IndexOp);
-  assert((PtrElTy->isIntOrIntVectorTy() || PtrElTy->isFPOrFPVectorTy()) &&
+  assert((PtrElTy->isIntOrIntVectorTy() || PtrElTy->isFPOrFPVectorTy() ||
+          PtrElTy->isPtrOrPtrVectorTy()) &&
          "We do not yet change the type of the access base during code "
          "generation.");
 
@@ -138,6 +139,12 @@ Value *IslExprBuilder::createOpAccess(isl_ast_expr *Expr) {
 
   isl_ast_expr_free(Expr);
   return Access;
+}
+
+Value *IslExprBuilder::createOpAccess(isl_ast_expr *Expr) {
+  Value *Addr = createAccessAddress(Expr);
+  assert(Addr && "Could not create op access address");
+  return Builder.CreateLoad(Addr, Addr->getName() + ".load");
 }
 
 Value *IslExprBuilder::createOpBin(__isl_take isl_ast_expr *Expr) {
@@ -264,34 +271,45 @@ Value *IslExprBuilder::createOpICmp(__isl_take isl_ast_expr *Expr) {
   LHS = create(isl_ast_expr_get_op_arg(Expr, 0));
   RHS = create(isl_ast_expr_get_op_arg(Expr, 1));
 
-  Type *MaxType = LHS->getType();
-  MaxType = getWidestType(MaxType, RHS->getType());
+  bool IsPtrType = LHS->getType()->isPointerTy();
+  assert((!IsPtrType || RHS->getType()->isPointerTy()) &&
+         "Both ICmp operators should be pointer types or none of them");
 
-  if (MaxType != RHS->getType())
-    RHS = Builder.CreateSExt(RHS, MaxType);
+  if (LHS->getType() != RHS->getType()) {
+    if (IsPtrType) {
+      Type *I8PtrTy = Builder.getInt8PtrTy();
+      if (LHS->getType() != I8PtrTy)
+        LHS = Builder.CreateBitCast(LHS, I8PtrTy);
+      if (RHS->getType() != I8PtrTy)
+        RHS = Builder.CreateBitCast(RHS, I8PtrTy);
+    } else {
+      Type *MaxType = LHS->getType();
+      MaxType = getWidestType(MaxType, RHS->getType());
 
-  if (MaxType != LHS->getType())
-    LHS = Builder.CreateSExt(LHS, MaxType);
+      if (MaxType != RHS->getType())
+        RHS = Builder.CreateSExt(RHS, MaxType);
 
-  switch (isl_ast_expr_get_op_type(Expr)) {
-  default:
-    llvm_unreachable("Unsupported ICmp isl ast expression");
-  case isl_ast_op_eq:
-    Res = Builder.CreateICmpEQ(LHS, RHS);
-    break;
-  case isl_ast_op_le:
-    Res = Builder.CreateICmpSLE(LHS, RHS);
-    break;
-  case isl_ast_op_lt:
-    Res = Builder.CreateICmpSLT(LHS, RHS);
-    break;
-  case isl_ast_op_ge:
-    Res = Builder.CreateICmpSGE(LHS, RHS);
-    break;
-  case isl_ast_op_gt:
-    Res = Builder.CreateICmpSGT(LHS, RHS);
-    break;
+      if (MaxType != LHS->getType())
+        LHS = Builder.CreateSExt(LHS, MaxType);
+    }
   }
+
+  isl_ast_op_type OpType = isl_ast_expr_get_op_type(Expr);
+  assert(OpType >= isl_ast_op_eq && OpType <= isl_ast_op_gt &&
+         "Unsupported ICmp isl ast expression");
+  assert(isl_ast_op_eq + 4 == isl_ast_op_gt &&
+         "Isl ast op type interface changed");
+
+  CmpInst::Predicate Predicates[5][2] = {
+      {CmpInst::ICMP_EQ, CmpInst::ICMP_EQ},
+      {CmpInst::ICMP_SLE, CmpInst::ICMP_ULE},
+      {CmpInst::ICMP_SLT, CmpInst::ICMP_ULT},
+      {CmpInst::ICMP_SGE, CmpInst::ICMP_UGE},
+      {CmpInst::ICMP_SGT, CmpInst::ICMP_UGT},
+  };
+
+  Res = Builder.CreateICmp(Predicates[OpType - isl_ast_op_eq][IsPtrType], LHS,
+                           RHS);
 
   isl_ast_expr_free(Expr);
   return Res;
@@ -324,8 +342,10 @@ Value *IslExprBuilder::createOpBoolean(__isl_take isl_ast_expr *Expr) {
   //
   // TODO: Document in isl itself, that the unconditionally evaluating the
   // second part of '||' or '&&' expressions is safe.
-  assert(LHS->getType() == Builder.getInt1Ty() && "Expected i1 type");
-  assert(RHS->getType() == Builder.getInt1Ty() && "Expected i1 type");
+  if (!LHS->getType()->isIntegerTy(1))
+    LHS = Builder.CreateIsNotNull(LHS);
+  if (!RHS->getType()->isIntegerTy(1))
+    RHS = Builder.CreateIsNotNull(RHS);
 
   switch (OpType) {
   default:
@@ -379,9 +399,29 @@ Value *IslExprBuilder::createOp(__isl_take isl_ast_expr *Expr) {
   case isl_ast_op_ge:
   case isl_ast_op_gt:
     return createOpICmp(Expr);
+  case isl_ast_op_address_of:
+    return createOpAddressOf(Expr);
   }
 
   llvm_unreachable("Unsupported isl_ast_expr_op kind.");
+}
+
+Value *IslExprBuilder::createOpAddressOf(__isl_take isl_ast_expr *Expr) {
+  assert(isl_ast_expr_get_type(Expr) == isl_ast_expr_op &&
+         "Expected an isl_ast_expr_op expression.");
+  assert(isl_ast_expr_get_op_n_arg(Expr) == 1 && "Address of should be unary.");
+
+  isl_ast_expr *Op = isl_ast_expr_get_op_arg(Expr, 0);
+  assert(isl_ast_expr_get_type(Op) == isl_ast_expr_op &&
+         "Expected address of operator to be an isl_ast_expr_op expression.");
+  assert(isl_ast_expr_get_op_type(Op) == isl_ast_op_access &&
+         "Expected address of operator to be an access expression.");
+
+  Value *V = createAccessAddress(Op);
+
+  isl_ast_expr_free(Expr);
+
+  return V;
 }
 
 Value *IslExprBuilder::createId(__isl_take isl_ast_expr *Expr) {

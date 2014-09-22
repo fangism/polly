@@ -1,4 +1,4 @@
-; RUN: opt %loadPolly -pass-remarks-missed="polly-detect" -polly-detect-track-failures -polly-detect -analyze < %s 2>&1| FileCheck %s
+; RUN: opt %loadPolly -polly-use-runtime-alias-checks=false -pass-remarks-missed="polly-detect" -polly-detect-track-failures -polly-detect -analyze < %s 2>&1| FileCheck %s
 
 ;void f(int A[], int B[]) {
 ;  for (int i=0; i<42; i++)
@@ -6,7 +6,7 @@
 ;}
 
 ; CHECK: remark: ReportAlias-01.c:2:8: The following errors keep this region from being a Scop.
-; CHECK: remark: ReportAlias-01.c:3:5: Accesses to the arrays "A", "B" may access the same memory.
+; CHECK: remark: ReportAlias-01.c:3:5: Accesses to the arrays "B", "A" may access the same memory.
 ; CHECK: remark: ReportAlias-01.c:3:5: Invalid Scop candidate ends here.
 
 target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"

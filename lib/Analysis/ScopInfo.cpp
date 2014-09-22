@@ -29,6 +29,7 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/RegionIterator.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Support/Debug.h"
@@ -330,6 +331,18 @@ MemoryAccess::~MemoryAccess() {
   isl_map_free(newAccessRelation);
 }
 
+static MemoryAccess::AccessType getMemoryAccessType(const IRAccess &Access) {
+  switch (Access.getType()) {
+  case IRAccess::READ:
+    return MemoryAccess::READ;
+  case IRAccess::MUST_WRITE:
+    return MemoryAccess::MUST_WRITE;
+  case IRAccess::MAY_WRITE:
+    return MemoryAccess::MAY_WRITE;
+  }
+  llvm_unreachable("Unknown IRAccess type!");
+}
+
 isl_id *MemoryAccess::getArrayId() const {
   return isl_map_get_tuple_id(AccessRelation, isl_dim_out);
 }
@@ -416,7 +429,8 @@ void MemoryAccess::assumeNoOutOfBound(const IRAccess &Access) {
 
 MemoryAccess::MemoryAccess(const IRAccess &Access, Instruction *AccInst,
                            ScopStmt *Statement)
-    : Statement(Statement), Inst(AccInst), newAccessRelation(nullptr) {
+    : Type(getMemoryAccessType(Access)), Statement(Statement), Inst(AccInst),
+      newAccessRelation(nullptr) {
 
   isl_ctx *Ctx = Statement->getIslCtx();
   BaseAddr = Access.getBase();
@@ -431,11 +445,8 @@ MemoryAccess::MemoryAccess(const IRAccess &Access, Instruction *AccInst,
     AccessRelation = isl_map_from_basic_map(createBasicAccessMap(Statement));
     AccessRelation =
         isl_map_set_tuple_id(AccessRelation, isl_dim_out, BaseAddrId);
-    Type = Access.isRead() ? READ : MAY_WRITE;
     return;
   }
-
-  Type = Access.isRead() ? READ : MUST_WRITE;
 
   isl_space *Space = isl_space_alloc(Ctx, 0, Statement->getNumIterators(), 0);
   AccessRelation = isl_map_universe(Space);
@@ -1118,6 +1129,104 @@ void Scop::simplifyAssumedContext() {
       isl_set_gist_params(AssumedContext, isl_union_set_params(getDomains()));
 }
 
+/// @brief Add the minimal/maximal access in @p Set to @p User.
+static int buildMinMaxAccess(__isl_take isl_set *Set, void *User) {
+  Scop::MinMaxVectorTy *MinMaxAccesses = (Scop::MinMaxVectorTy *)User;
+  isl_pw_multi_aff *MinPMA, *MaxPMA;
+  isl_pw_aff *LastDimAff;
+  isl_aff *OneAff;
+  unsigned Pos;
+
+  MinPMA = isl_set_lexmin_pw_multi_aff(isl_set_copy(Set));
+  MaxPMA = isl_set_lexmax_pw_multi_aff(isl_set_copy(Set));
+
+  // Adjust the last dimension of the maximal access by one as we want to
+  // enclose the accessed memory region by MinPMA and MaxPMA. The pointer
+  // we test during code generation might now point after the end of the
+  // allocated array but we will never dereference it anyway.
+  assert(isl_pw_multi_aff_dim(MaxPMA, isl_dim_out) &&
+         "Assumed at least one output dimension");
+  Pos = isl_pw_multi_aff_dim(MaxPMA, isl_dim_out) - 1;
+  LastDimAff = isl_pw_multi_aff_get_pw_aff(MaxPMA, Pos);
+  OneAff = isl_aff_zero_on_domain(
+      isl_local_space_from_space(isl_pw_aff_get_domain_space(LastDimAff)));
+  OneAff = isl_aff_add_constant_si(OneAff, 1);
+  LastDimAff = isl_pw_aff_add(LastDimAff, isl_pw_aff_from_aff(OneAff));
+  MaxPMA = isl_pw_multi_aff_set_pw_aff(MaxPMA, Pos, LastDimAff);
+
+  MinMaxAccesses->push_back(std::make_pair(MinPMA, MaxPMA));
+
+  isl_set_free(Set);
+  return 0;
+}
+
+void Scop::buildAliasGroups(AliasAnalysis &AA) {
+  // To create sound alias checks we perform the following steps:
+  //   o) Use the alias analysis and an alias set tracker to build alias sets
+  //      for all memory accesses inside the SCoP.
+  //   o) For each alias set we then map the aliasing pointers back to the
+  //      memory accesses we know, thus obtain groups of memory accesses which
+  //      might alias.
+  //   o) For each group with more then one base pointer we then compute minimal
+  //      and maximal accesses to each array in this group.
+  using AliasGroupTy = SmallVector<MemoryAccess *, 4>;
+
+  AliasSetTracker AST(AA);
+
+  DenseMap<Value *, MemoryAccess *> PtrToAcc;
+  for (ScopStmt *Stmt : *this) {
+    for (MemoryAccess *MA : *Stmt) {
+      if (MA->isScalar())
+        continue;
+      Instruction *Acc = MA->getAccessInstruction();
+      PtrToAcc[getPointerOperand(*Acc)] = MA;
+      AST.add(Acc);
+    }
+  }
+
+  SmallVector<AliasGroupTy, 4> AliasGroups;
+  for (AliasSet &AS : AST) {
+    if (AS.isMustAlias())
+      continue;
+    AliasGroupTy AG;
+    for (auto PR : AS)
+      AG.push_back(PtrToAcc[PR.getValue()]);
+    assert(AG.size() > 1 &&
+           "Alias groups should contain at least two accesses");
+    AliasGroups.push_back(std::move(AG));
+  }
+
+  SmallPtrSet<const Value *, 4> BaseValues;
+  for (auto I = AliasGroups.begin(); I != AliasGroups.end();) {
+    BaseValues.clear();
+    for (MemoryAccess *MA : *I)
+      BaseValues.insert(MA->getBaseAddr());
+    if (BaseValues.size() > 1)
+      I++;
+    else
+      I = AliasGroups.erase(I);
+  }
+
+  for (AliasGroupTy &AG : AliasGroups) {
+    MinMaxVectorTy *MinMaxAccesses = new MinMaxVectorTy();
+    MinMaxAccesses->reserve(AG.size());
+
+    isl_union_map *Accesses = isl_union_map_empty(getParamSpace());
+    for (MemoryAccess *MA : AG)
+      Accesses = isl_union_map_add_map(Accesses, MA->getAccessRelation());
+    Accesses = isl_union_map_intersect_domain(Accesses, getDomains());
+
+    isl_union_set *Locations = isl_union_map_range(Accesses);
+    Locations = isl_union_set_intersect_params(Locations, getAssumedContext());
+    Locations = isl_union_set_coalesce(Locations);
+    Locations = isl_union_set_detect_equalities(Locations);
+    isl_union_set_foreach_set(Locations, buildMinMaxAccess, MinMaxAccesses);
+    isl_union_set_free(Locations);
+
+    MinMaxAliasGroups.push_back(MinMaxAccesses);
+  }
+}
+
 Scop::Scop(TempScop &tempScop, LoopInfo &LI, ScalarEvolution &ScalarEvolution,
            isl_ctx *Context)
     : SE(&ScalarEvolution), R(tempScop.getMaxRegion()),
@@ -1148,6 +1257,15 @@ Scop::~Scop() {
   // Free the statements;
   for (ScopStmt *Stmt : *this)
     delete Stmt;
+
+  // Free the alias groups
+  for (MinMaxVectorTy *MinMaxAccesses : MinMaxAliasGroups) {
+    for (MinMaxAccessTy &MMA : *MinMaxAccesses) {
+      isl_pw_multi_aff_free(MMA.first);
+      isl_pw_multi_aff_free(MMA.second);
+    }
+    delete MinMaxAccesses;
+  }
 }
 
 std::string Scop::getContextStr() const { return stringFromIslObj(Context); }
@@ -1209,6 +1327,20 @@ void Scop::printContext(raw_ostream &OS) const {
   }
 }
 
+void Scop::printAliasAssumptions(raw_ostream &OS) const {
+  OS.indent(4) << "Alias Groups (" << MinMaxAliasGroups.size() << "):\n";
+  if (MinMaxAliasGroups.empty()) {
+    OS.indent(8) << "n/a\n";
+    return;
+  }
+  for (MinMaxVectorTy *MinMaxAccesses : MinMaxAliasGroups) {
+    OS.indent(8) << "[[";
+    for (MinMaxAccessTy &MinMacAccess : *MinMaxAccesses)
+      OS << " <" << MinMacAccess.first << ", " << MinMacAccess.second << ">";
+    OS << " ]]\n";
+  }
+}
+
 void Scop::printStatements(raw_ostream &OS) const {
   OS << "Statements {\n";
 
@@ -1223,6 +1355,7 @@ void Scop::print(raw_ostream &OS) const {
                << "\n";
   OS.indent(4) << "Region: " << getNameStr() << "\n";
   printContext(OS.indent(4));
+  printAliasAssumptions(OS);
   printStatements(OS.indent(4));
 }
 
@@ -1409,11 +1542,13 @@ void ScopInfo::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequired<RegionInfoPass>();
   AU.addRequired<ScalarEvolution>();
   AU.addRequired<TempScopInfo>();
+  AU.addRequired<AliasAnalysis>();
   AU.setPreservesAll();
 }
 
 bool ScopInfo::runOnRegion(Region *R, RGPassManager &RGM) {
   LoopInfo &LI = getAnalysis<LoopInfo>();
+  AliasAnalysis &AA = getAnalysis<AliasAnalysis>();
   ScalarEvolution &SE = getAnalysis<ScalarEvolution>();
 
   TempScop *tempScop = getAnalysis<TempScopInfo>().getTempScop(R);
@@ -1431,6 +1566,9 @@ bool ScopInfo::runOnRegion(Region *R, RGPassManager &RGM) {
 
   scop = new Scop(*tempScop, LI, SE, ctx);
 
+  if (PollyUseRuntimeAliasChecks)
+    scop->buildAliasGroups(AA);
+
   return false;
 }
 
@@ -1441,6 +1579,7 @@ Pass *polly::createScopInfoPass() { return new ScopInfo(); }
 INITIALIZE_PASS_BEGIN(ScopInfo, "polly-scops",
                       "Polly - Create polyhedral description of Scops", false,
                       false);
+INITIALIZE_AG_DEPENDENCY(AliasAnalysis);
 INITIALIZE_PASS_DEPENDENCY(LoopInfo);
 INITIALIZE_PASS_DEPENDENCY(RegionInfoPass);
 INITIALIZE_PASS_DEPENDENCY(ScalarEvolution);
