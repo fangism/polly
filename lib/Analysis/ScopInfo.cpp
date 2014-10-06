@@ -64,6 +64,11 @@ static cl::opt<bool> DisableMultiplicativeReductions(
     cl::desc("Disable multiplicative reductions"), cl::Hidden, cl::ZeroOrMore,
     cl::init(false), cl::cat(PollyCategory));
 
+static cl::opt<unsigned> RunTimeChecksMaxParameters(
+    "polly-rtc-max-parameters",
+    cl::desc("The maximal number of parameters allowed in RTCs."), cl::Hidden,
+    cl::ZeroOrMore, cl::init(8), cl::cat(PollyCategory));
+
 /// Translate a 'const SCEV *' expression in an isl_pw_aff.
 struct SCEVAffinator : public SCEVVisitor<SCEVAffinator, isl_pw_aff *> {
 public:
@@ -273,6 +278,43 @@ int SCEVAffinator::getLoopDepth(const Loop *L) {
   return L->getLoopDepth() - outerLoop->getLoopDepth();
 }
 
+ScopArrayInfo::ScopArrayInfo(Value *BasePtr, Type *AccessType, isl_ctx *Ctx,
+                             const SmallVector<const SCEV *, 4> &DimensionSizes)
+    : BasePtr(BasePtr), AccessType(AccessType), DimensionSizes(DimensionSizes) {
+  const std::string BasePtrName = getIslCompatibleName("MemRef_", BasePtr, "");
+  Id = isl_id_alloc(Ctx, BasePtrName.c_str(), this);
+}
+
+ScopArrayInfo::~ScopArrayInfo() { isl_id_free(Id); }
+
+isl_id *ScopArrayInfo::getBasePtrId() const { return isl_id_copy(Id); }
+
+void ScopArrayInfo::dump() const { print(errs()); }
+
+void ScopArrayInfo::print(raw_ostream &OS) const {
+  OS << "ScopArrayInfo:\n";
+  OS << "  Base: " << *getBasePtr() << "\n";
+  OS << "  Type: " << *getType() << "\n";
+  OS << "  Dimension Sizes:\n";
+  for (unsigned u = 0; u < getNumberOfDimensions(); u++)
+    OS << "    " << u << ") " << *DimensionSizes[u] << "\n";
+  OS << "\n";
+}
+
+const ScopArrayInfo *
+ScopArrayInfo::getFromAccessFunction(__isl_keep isl_pw_multi_aff *PMA) {
+  isl_id *Id = isl_pw_multi_aff_get_tuple_id(PMA, isl_dim_out);
+  assert(Id && "Output dimension didn't have an ID");
+  return getFromId(Id);
+}
+
+const ScopArrayInfo *ScopArrayInfo::getFromId(isl_id *Id) {
+  void *User = isl_id_get_user(Id);
+  const ScopArrayInfo *SAI = static_cast<ScopArrayInfo *>(User);
+  isl_id_free(Id);
+  return SAI;
+}
+
 const std::string
 MemoryAccess::getReductionOperatorStr(MemoryAccess::ReductionType RT) {
   switch (RT) {
@@ -341,6 +383,14 @@ static MemoryAccess::AccessType getMemoryAccessType(const IRAccess &Access) {
     return MemoryAccess::MAY_WRITE;
   }
   llvm_unreachable("Unknown IRAccess type!");
+}
+
+const ScopArrayInfo *MemoryAccess::getScopArrayInfo() const {
+  isl_id *ArrayId = getArrayId();
+  void *User = isl_id_get_user(ArrayId);
+  const ScopArrayInfo *SAI = static_cast<ScopArrayInfo *>(User);
+  isl_id_free(ArrayId);
+  return SAI;
 }
 
 isl_id *MemoryAccess::getArrayId() const {
@@ -428,14 +478,15 @@ void MemoryAccess::assumeNoOutOfBound(const IRAccess &Access) {
 }
 
 MemoryAccess::MemoryAccess(const IRAccess &Access, Instruction *AccInst,
-                           ScopStmt *Statement)
+                           ScopStmt *Statement, const ScopArrayInfo *SAI)
     : Type(getMemoryAccessType(Access)), Statement(Statement), Inst(AccInst),
       newAccessRelation(nullptr) {
 
   isl_ctx *Ctx = Statement->getIslCtx();
   BaseAddr = Access.getBase();
   BaseName = getIslCompatibleName("MemRef_", getBaseAddr(), "");
-  isl_id *BaseAddrId = isl_id_alloc(Ctx, getBaseName().c_str(), nullptr);
+
+  isl_id *BaseAddrId = SAI->getBasePtrId();
 
   if (!Access.isAffine()) {
     // We overapproximate non-affine accesses with a possible access to the
@@ -661,18 +712,23 @@ void ScopStmt::buildScattering(SmallVectorImpl<unsigned> &Scatter) {
 }
 
 void ScopStmt::buildAccesses(TempScop &tempScop, const Region &CurRegion) {
-  for (auto &&Access : *tempScop.getAccessFunctions(BB)) {
-    MemAccs.push_back(new MemoryAccess(Access.first, Access.second, this));
+  for (const auto &AccessPair : *tempScop.getAccessFunctions(BB)) {
+    const IRAccess &Access = AccessPair.first;
+    Instruction *AccessInst = AccessPair.second;
+
+    const ScopArrayInfo *SAI =
+        getParent()->getOrCreateScopArrayInfo(Access, AccessInst);
+    MemAccs.push_back(new MemoryAccess(Access, AccessInst, this, SAI));
 
     // We do not track locations for scalar memory accesses at the moment.
     //
     // We do not have a use for this information at the moment. If we need this
     // at some point, the "instruction -> access" mapping needs to be enhanced
     // as a single instruction could then possibly perform multiple accesses.
-    if (!Access.first.isScalar()) {
-      assert(!InstructionToAccess.count(Access.second) &&
+    if (!Access.isScalar()) {
+      assert(!InstructionToAccess.count(AccessInst) &&
              "Unexpected 1-to-N mapping on instruction to access map!");
-      InstructionToAccess[Access.second] = MemAccs.back();
+      InstructionToAccess[AccessInst] = MemAccs.back();
     }
   }
 }
@@ -1137,6 +1193,32 @@ static int buildMinMaxAccess(__isl_take isl_set *Set, void *User) {
   isl_aff *OneAff;
   unsigned Pos;
 
+  // Restrict the number of parameters involved in the access as the lexmin/
+  // lexmax computation will take too long if this number is high.
+  //
+  // Experiments with a simple test case using an i7 4800MQ:
+  //
+  //  #Parameters involved | Time (in sec)
+  //            6          |     0.01
+  //            7          |     0.04
+  //            8          |     0.12
+  //            9          |     0.40
+  //           10          |     1.54
+  //           11          |     6.78
+  //           12          |    30.38
+  //
+  if (isl_set_n_param(Set) > RunTimeChecksMaxParameters) {
+    unsigned InvolvedParams = 0;
+    for (unsigned u = 0, e = isl_set_n_param(Set); u < e; u++)
+      if (isl_set_involves_dims(Set, isl_dim_param, u, 1))
+        InvolvedParams++;
+
+    if (InvolvedParams > RunTimeChecksMaxParameters) {
+      isl_set_free(Set);
+      return -1;
+    }
+  }
+
   MinPMA = isl_set_lexmin_pw_multi_aff(isl_set_copy(Set));
   MaxPMA = isl_set_lexmax_pw_multi_aff(isl_set_copy(Set));
 
@@ -1160,24 +1242,39 @@ static int buildMinMaxAccess(__isl_take isl_set *Set, void *User) {
   return 0;
 }
 
-void Scop::buildAliasGroups(AliasAnalysis &AA) {
+static __isl_give isl_set *getAccessDomain(MemoryAccess *MA) {
+  isl_set *Domain = MA->getStatement()->getDomain();
+  Domain = isl_set_project_out(Domain, isl_dim_set, 0, isl_set_n_dim(Domain));
+  return isl_set_reset_tuple_id(Domain);
+}
+
+bool Scop::buildAliasGroups(AliasAnalysis &AA) {
   // To create sound alias checks we perform the following steps:
   //   o) Use the alias analysis and an alias set tracker to build alias sets
   //      for all memory accesses inside the SCoP.
   //   o) For each alias set we then map the aliasing pointers back to the
   //      memory accesses we know, thus obtain groups of memory accesses which
   //      might alias.
-  //   o) For each group with more then one base pointer we then compute minimal
+  //   o) We divide each group based on the domains of the minimal/maximal
+  //      accesses. That means two minimal/maximal accesses are only in a group
+  //      if their access domains intersect, otherwise they are in different
+  //      ones.
+  //   o) We split groups such that they contain at most one read only base
+  //      address.
+  //   o) For each group with more than one base pointer we then compute minimal
   //      and maximal accesses to each array in this group.
   using AliasGroupTy = SmallVector<MemoryAccess *, 4>;
 
   AliasSetTracker AST(AA);
 
   DenseMap<Value *, MemoryAccess *> PtrToAcc;
+  DenseSet<Value *> HasWriteAccess;
   for (ScopStmt *Stmt : *this) {
     for (MemoryAccess *MA : *Stmt) {
       if (MA->isScalar())
         continue;
+      if (!MA->isRead())
+        HasWriteAccess.insert(MA->getBaseAddr());
       Instruction *Acc = MA->getAccessInstruction();
       PtrToAcc[getPointerOperand(*Acc)] = MA;
       AST.add(Acc);
@@ -1196,18 +1293,82 @@ void Scop::buildAliasGroups(AliasAnalysis &AA) {
     AliasGroups.push_back(std::move(AG));
   }
 
-  SmallPtrSet<const Value *, 4> BaseValues;
-  for (auto I = AliasGroups.begin(); I != AliasGroups.end();) {
-    BaseValues.clear();
-    for (MemoryAccess *MA : *I)
-      BaseValues.insert(MA->getBaseAddr());
-    if (BaseValues.size() > 1)
-      I++;
-    else
-      I = AliasGroups.erase(I);
+  // Split the alias groups based on their domain.
+  for (unsigned u = 0; u < AliasGroups.size(); u++) {
+    AliasGroupTy NewAG;
+    AliasGroupTy &AG = AliasGroups[u];
+    AliasGroupTy::iterator AGI = AG.begin();
+    isl_set *AGDomain = getAccessDomain(*AGI);
+    while (AGI != AG.end()) {
+      MemoryAccess *MA = *AGI;
+      isl_set *MADomain = getAccessDomain(MA);
+      if (isl_set_is_disjoint(AGDomain, MADomain)) {
+        NewAG.push_back(MA);
+        AGI = AG.erase(AGI);
+        isl_set_free(MADomain);
+      } else {
+        AGDomain = isl_set_union(AGDomain, MADomain);
+        AGI++;
+      }
+    }
+    if (NewAG.size() > 1)
+      AliasGroups.push_back(std::move(NewAG));
+    isl_set_free(AGDomain);
   }
 
+  DenseMap<const Value *, SmallPtrSet<MemoryAccess *, 8>> ReadOnlyPairs;
+  SmallPtrSet<const Value *, 4> NonReadOnlyBaseValues;
   for (AliasGroupTy &AG : AliasGroups) {
+    NonReadOnlyBaseValues.clear();
+    ReadOnlyPairs.clear();
+
+    if (AG.size() < 2) {
+      AG.clear();
+      continue;
+    }
+
+    for (auto II = AG.begin(); II != AG.end();) {
+      Value *BaseAddr = (*II)->getBaseAddr();
+      if (HasWriteAccess.count(BaseAddr)) {
+        NonReadOnlyBaseValues.insert(BaseAddr);
+        II++;
+      } else {
+        ReadOnlyPairs[BaseAddr].insert(*II);
+        II = AG.erase(II);
+      }
+    }
+
+    // If we don't have read only pointers check if there are at least two
+    // non read only pointers, otherwise clear the alias group.
+    if (ReadOnlyPairs.empty()) {
+      if (NonReadOnlyBaseValues.size() <= 1)
+        AG.clear();
+      continue;
+    }
+
+    // If we don't have non read only pointers clear the alias group.
+    if (NonReadOnlyBaseValues.empty()) {
+      AG.clear();
+      continue;
+    }
+
+    // If we have both read only and non read only base pointers we combine
+    // the non read only ones with exactly one read only one at a time into a
+    // new alias group and clear the old alias group in the end.
+    for (const auto &ReadOnlyPair : ReadOnlyPairs) {
+      AliasGroupTy AGNonReadOnly = AG;
+      for (MemoryAccess *MA : ReadOnlyPair.second)
+        AGNonReadOnly.push_back(MA);
+      AliasGroups.push_back(std::move(AGNonReadOnly));
+    }
+    AG.clear();
+  }
+
+  bool Valid = true;
+  for (AliasGroupTy &AG : AliasGroups) {
+    if (AG.empty())
+      continue;
+
     MinMaxVectorTy *MinMaxAccesses = new MinMaxVectorTy();
     MinMaxAccesses->reserve(AG.size());
 
@@ -1220,11 +1381,16 @@ void Scop::buildAliasGroups(AliasAnalysis &AA) {
     Locations = isl_union_set_intersect_params(Locations, getAssumedContext());
     Locations = isl_union_set_coalesce(Locations);
     Locations = isl_union_set_detect_equalities(Locations);
-    isl_union_set_foreach_set(Locations, buildMinMaxAccess, MinMaxAccesses);
+    Valid = (0 == isl_union_set_foreach_set(Locations, buildMinMaxAccess,
+                                            MinMaxAccesses));
     isl_union_set_free(Locations);
-
     MinMaxAliasGroups.push_back(MinMaxAccesses);
+
+    if (!Valid)
+      break;
   }
+
+  return Valid;
 }
 
 Scop::Scop(TempScop &tempScop, LoopInfo &LI, ScalarEvolution &ScalarEvolution,
@@ -1258,6 +1424,10 @@ Scop::~Scop() {
   for (ScopStmt *Stmt : *this)
     delete Stmt;
 
+  // Free the ScopArrayInfo objects.
+  for (auto &ScopArrayInfoPair : ScopArrayInfoMap)
+    delete ScopArrayInfoPair.second;
+
   // Free the alias groups
   for (MinMaxVectorTy *MinMaxAccesses : MinMaxAliasGroups) {
     for (MinMaxAccessTy &MMA : *MinMaxAccesses) {
@@ -1266,6 +1436,26 @@ Scop::~Scop() {
     }
     delete MinMaxAccesses;
   }
+}
+
+const ScopArrayInfo *Scop::getOrCreateScopArrayInfo(const IRAccess &Access,
+                                                    Instruction *AccessInst) {
+  Value *BasePtr = Access.getBase();
+  const ScopArrayInfo *&SAI = ScopArrayInfoMap[BasePtr];
+  if (!SAI) {
+    Type *AccessType = getPointerOperand(*AccessInst)->getType();
+    SAI = new ScopArrayInfo(BasePtr, AccessType, getIslCtx(), Access.Sizes);
+  }
+  return SAI;
+}
+
+const ScopArrayInfo *Scop::getScopArrayInfo(Value *BasePtr) {
+  const SCEV *PtrSCEV = SE->getSCEV(BasePtr);
+  const SCEVUnknown *PtrBaseSCEV =
+      cast<SCEVUnknown>(SE->getPointerBase(PtrSCEV));
+  const ScopArrayInfo *SAI = ScopArrayInfoMap[PtrBaseSCEV->getValue()];
+  assert(SAI && "No ScopArrayInfo available for this base pointer");
+  return SAI;
 }
 
 std::string Scop::getContextStr() const { return stringFromIslObj(Context); }
@@ -1566,9 +1756,28 @@ bool ScopInfo::runOnRegion(Region *R, RGPassManager &RGM) {
 
   scop = new Scop(*tempScop, LI, SE, ctx);
 
-  if (PollyUseRuntimeAliasChecks)
-    scop->buildAliasGroups(AA);
+  if (!PollyUseRuntimeAliasChecks)
+    return false;
 
+  // If a problem occurs while building the alias groups we need to delete
+  // this SCoP and pretend it wasn't valid in the first place.
+  if (scop->buildAliasGroups(AA))
+    return false;
+
+  --ScopFound;
+  if (tempScop->getMaxLoopDepth() > 0)
+    --RichScopFound;
+
+  DEBUG(dbgs()
+        << "\n\nNOTE: Run time checks for " << scop->getNameStr()
+        << " could not be created as the number of parameters involved is too "
+           "high. The SCoP will be "
+           "dismissed.\nUse:\n\t--polly-rtc-max-parameters=X\nto adjust the "
+           "maximal number of parameters but be advised that the compile time "
+           "might increase exponentially.\n\n");
+
+  delete scop;
+  scop = nullptr;
   return false;
 }
 

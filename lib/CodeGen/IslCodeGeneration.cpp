@@ -23,7 +23,6 @@
 #include "polly/CodeGen/BlockGenerators.h"
 #include "polly/CodeGen/CodeGeneration.h"
 #include "polly/CodeGen/IslAst.h"
-#include "polly/CodeGen/IslExprBuilder.h"
 #include "polly/CodeGen/LoopGenerators.h"
 #include "polly/CodeGen/Utils.h"
 #include "polly/Dependences.h"
@@ -56,10 +55,14 @@ using namespace llvm;
 
 class IslNodeBuilder {
 public:
-  IslNodeBuilder(PollyIRBuilder &Builder, LoopAnnotator &Annotator, Pass *P,
+  IslNodeBuilder(PollyIRBuilder &Builder, ScopAnnotator &Annotator, Pass *P,
                  LoopInfo &LI, ScalarEvolution &SE, DominatorTree &DT)
-      : Builder(Builder), Annotator(Annotator), ExprBuilder(Builder, IDToValue),
-        P(P), LI(LI), SE(SE), DT(DT) {}
+      : Builder(Builder), Annotator(Annotator),
+        Rewriter(new SCEVExpander(SE, "polly")),
+        ExprBuilder(Builder, IDToValue, *Rewriter), P(P), LI(LI), SE(SE),
+        DT(DT) {}
+
+  ~IslNodeBuilder() { delete Rewriter; }
 
   /// @brief Add the mappings from array id's to array llvm::Value's.
   void addMemoryAccesses(Scop &S);
@@ -69,7 +72,11 @@ public:
 
 private:
   PollyIRBuilder &Builder;
-  LoopAnnotator &Annotator;
+  ScopAnnotator &Annotator;
+
+  /// @brief A SCEVExpander to create llvm values from SCEVs.
+  SCEVExpander *Rewriter;
+
   IslExprBuilder ExprBuilder;
   Pass *P;
   LoopInfo &LI;
@@ -319,8 +326,8 @@ void IslNodeBuilder::createForSequential(__isl_take isl_ast_node *For) {
   CmpInst::Predicate Predicate;
   bool Parallel;
 
-  Parallel = IslAstInfo::isInnermostParallel(For) &&
-             !IslAstInfo::isReductionParallel(For);
+  Parallel =
+      IslAstInfo::isParallel(For) && !IslAstInfo::isReductionParallel(For);
 
   Body = isl_ast_node_for_get_body(For);
 
@@ -362,7 +369,7 @@ void IslNodeBuilder::createForSequential(__isl_take isl_ast_node *For) {
 
   create(Body);
 
-  Annotator.End();
+  Annotator.popLoop(Parallel);
 
   IDToValue.erase(IteratorID);
 
@@ -533,7 +540,6 @@ void IslNodeBuilder::create(__isl_take isl_ast_node *Node) {
 }
 
 void IslNodeBuilder::addParameters(__isl_take isl_set *Context) {
-  SCEVExpander Rewriter(SE, "polly");
 
   for (unsigned i = 0; i < isl_set_dim(Context, isl_dim_param); ++i) {
     isl_id *Id;
@@ -545,7 +551,7 @@ void IslNodeBuilder::addParameters(__isl_take isl_set *Context) {
     Scev = (const SCEV *)isl_id_get_user(Id);
     T = dyn_cast<IntegerType>(Scev->getType());
     InsertLocation = --(Builder.GetInsertBlock()->end());
-    Value *V = Rewriter.expandCodeFor(Scev, T, InsertLocation);
+    Value *V = Rewriter->expandCodeFor(Scev, T, InsertLocation);
     IDToValue[Id] = V;
 
     isl_id_free(Id);
@@ -580,7 +586,7 @@ public:
   ///}
 
   /// @brief The loop annotator to generate llvm.loop metadata.
-  LoopAnnotator Annotator;
+  ScopAnnotator Annotator;
 
   /// @brief Build the runtime condition.
   ///
@@ -604,6 +610,10 @@ public:
 
     assert(!S.getRegion().isTopLevelRegion() &&
            "Top level regions are not supported");
+
+    // Build the alias scopes for annotations first.
+    if (PollyAnnotateAliasScopes)
+      Annotator.buildAliasScopes(S);
 
     BasicBlock *EnteringBB = simplifyRegion(&S, this);
     PollyIRBuilder Builder = createPollyIRBuilder(EnteringBB, Annotator);
