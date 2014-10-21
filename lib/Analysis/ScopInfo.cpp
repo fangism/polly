@@ -397,15 +397,27 @@ isl_id *MemoryAccess::getArrayId() const {
   return isl_map_get_tuple_id(AccessRelation, isl_dim_out);
 }
 
-isl_map *MemoryAccess::getAccessRelation() const {
+isl_pw_multi_aff *
+MemoryAccess::applyScheduleToAccessRelation(isl_union_map *USchedule) const {
+  isl_map *Schedule, *ScheduledAccRel;
+  isl_union_set *UDomain;
+
+  UDomain = isl_union_set_from_set(getStatement()->getDomain());
+  USchedule = isl_union_map_intersect_domain(USchedule, UDomain);
+  Schedule = isl_map_from_union_map(USchedule);
+  ScheduledAccRel = isl_map_apply_domain(getAccessRelation(), Schedule);
+  return isl_pw_multi_aff_from_map(ScheduledAccRel);
+}
+
+isl_map *MemoryAccess::getOriginalAccessRelation() const {
   return isl_map_copy(AccessRelation);
 }
 
-std::string MemoryAccess::getAccessRelationStr() const {
+std::string MemoryAccess::getOriginalAccessRelationStr() const {
   return stringFromIslObj(AccessRelation);
 }
 
-__isl_give isl_space *MemoryAccess::getAccessRelationSpace() const {
+__isl_give isl_space *MemoryAccess::getOriginalAccessRelationSpace() const {
   return isl_map_get_space(AccessRelation);
 }
 
@@ -444,7 +456,7 @@ isl_basic_map *MemoryAccess::createBasicAccessMap(ScopStmt *Statement) {
 // constraints is the set of constraints that needs to be assumed to ensure such
 // statement instances are never executed.
 void MemoryAccess::assumeNoOutOfBound(const IRAccess &Access) {
-  isl_space *Space = isl_space_range(getAccessRelationSpace());
+  isl_space *Space = isl_space_range(getOriginalAccessRelationSpace());
   isl_set *Outside = isl_set_empty(isl_space_copy(Space));
   for (int i = 1, Size = Access.Subscripts.size(); i < Size; ++i) {
     isl_local_space *LS = isl_local_space_from_space(isl_space_copy(Space));
@@ -479,7 +491,7 @@ void MemoryAccess::assumeNoOutOfBound(const IRAccess &Access) {
 
 MemoryAccess::MemoryAccess(const IRAccess &Access, Instruction *AccInst,
                            ScopStmt *Statement, const ScopArrayInfo *SAI)
-    : Type(getMemoryAccessType(Access)), Statement(Statement), Inst(AccInst),
+    : AccType(getMemoryAccessType(Access)), Statement(Statement), Inst(AccInst),
       newAccessRelation(nullptr) {
 
   isl_ctx *Ctx = Statement->getIslCtx();
@@ -553,7 +565,7 @@ raw_ostream &polly::operator<<(raw_ostream &OS,
 }
 
 void MemoryAccess::print(raw_ostream &OS) const {
-  switch (Type) {
+  switch (AccType) {
   case READ:
     OS.indent(12) << "ReadAccess :=\t";
     break;
@@ -565,7 +577,7 @@ void MemoryAccess::print(raw_ostream &OS) const {
     break;
   }
   OS << "[Reduction Type: " << getReductionType() << "]\n";
-  OS.indent(16) << getAccessRelationStr() << ";\n";
+  OS.indent(16) << getOriginalAccessRelationStr() << ";\n";
 }
 
 void MemoryAccess::dump() const { print(errs()); }
@@ -1222,6 +1234,9 @@ static int buildMinMaxAccess(__isl_take isl_set *Set, void *User) {
   MinPMA = isl_set_lexmin_pw_multi_aff(isl_set_copy(Set));
   MaxPMA = isl_set_lexmax_pw_multi_aff(isl_set_copy(Set));
 
+  MinPMA = isl_pw_multi_aff_coalesce(MinPMA);
+  MaxPMA = isl_pw_multi_aff_coalesce(MaxPMA);
+
   // Adjust the last dimension of the maximal access by one as we want to
   // enclose the accessed memory region by MinPMA and MaxPMA. The pointer
   // we test during code generation might now point after the end of the
@@ -1270,6 +1285,14 @@ bool Scop::buildAliasGroups(AliasAnalysis &AA) {
   DenseMap<Value *, MemoryAccess *> PtrToAcc;
   DenseSet<Value *> HasWriteAccess;
   for (ScopStmt *Stmt : *this) {
+
+    // Skip statements with an empty domain as they will never be executed.
+    isl_set *StmtDomain = Stmt->getDomain();
+    bool StmtDomainEmpty = isl_set_is_empty(StmtDomain);
+    isl_set_free(StmtDomain);
+    if (StmtDomainEmpty)
+      continue;
+
     for (MemoryAccess *MA : *Stmt) {
       if (MA->isScalar())
         continue;
@@ -1283,7 +1306,7 @@ bool Scop::buildAliasGroups(AliasAnalysis &AA) {
 
   SmallVector<AliasGroupTy, 4> AliasGroups;
   for (AliasSet &AS : AST) {
-    if (AS.isMustAlias())
+    if (AS.isMustAlias() || AS.isForwardingAliasSet())
       continue;
     AliasGroupTy AG;
     for (auto PR : AS)

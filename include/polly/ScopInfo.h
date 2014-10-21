@@ -165,7 +165,7 @@ private:
   const MemoryAccess &operator=(const MemoryAccess &) LLVM_DELETED_FUNCTION;
 
   isl_map *AccessRelation;
-  enum AccessType Type;
+  enum AccessType AccType;
 
   /// @brief The base address (e.g., A for A[i+j]).
   Value *BaseAddr;
@@ -208,6 +208,15 @@ private:
 
   void assumeNoOutOfBound(const IRAccess &Access);
 
+  /// @brief Get the original access function as read from IR.
+  isl_map *getOriginalAccessRelation() const;
+
+  /// @brief Return the space in which the access relation lives in.
+  __isl_give isl_space *getOriginalAccessRelationSpace() const;
+
+  /// @brief Get the new access function imported or set by a pass
+  isl_map *getNewAccessRelation() const;
+
 public:
   /// @brief Create a memory access from an access in LLVM-IR.
   ///
@@ -221,30 +230,47 @@ public:
   ~MemoryAccess();
 
   /// @brief Get the type of a memory access.
-  enum AccessType getType() { return Type; }
+  enum AccessType getType() { return AccType; }
 
   /// @brief Is this a reduction like access?
   bool isReductionLike() const { return RedType != RT_NONE; }
 
   /// @brief Is this a read memory access?
-  bool isRead() const { return Type == MemoryAccess::READ; }
+  bool isRead() const { return AccType == MemoryAccess::READ; }
 
   /// @brief Is this a must-write memory access?
-  bool isMustWrite() const { return Type == MemoryAccess::MUST_WRITE; }
+  bool isMustWrite() const { return AccType == MemoryAccess::MUST_WRITE; }
 
   /// @brief Is this a may-write memory access?
-  bool isMayWrite() const { return Type == MemoryAccess::MAY_WRITE; }
+  bool isMayWrite() const { return AccType == MemoryAccess::MAY_WRITE; }
 
   /// @brief Is this a write memory access?
   bool isWrite() const { return isMustWrite() || isMayWrite(); }
 
-  isl_map *getAccessRelation() const;
+  /// @brief Check if a new access relation was imported or set by a pass.
+  bool hasNewAccessRelation() const { return newAccessRelation; }
 
-  /// @brief Return the space in which the access relation lives in.
-  __isl_give isl_space *getAccessRelationSpace() const;
+  /// @brief Return the newest access relation of this access.
+  ///
+  /// There are two possibilities:
+  ///   1) The original access relation read from the LLVM-IR.
+  ///   2) A new access relation imported from a json file or set by another
+  ///      pass (e.g., for privatization).
+  ///
+  /// As 2) is by construction "newer" than 1) we return the new access
+  /// relation if present.
+  ///
+  isl_map *getAccessRelation() const {
+    return hasNewAccessRelation() ? getNewAccessRelation()
+                                  : getOriginalAccessRelation();
+  }
 
-  /// @brief Get an isl string representing this access function.
-  std::string getAccessRelationStr() const;
+  /// @brief Return the access relation after the schedule was applied.
+  __isl_give isl_pw_multi_aff *
+  applyScheduleToAccessRelation(__isl_keep isl_union_map *Schedule) const;
+
+  /// @brief Get an isl string representing the access function read from IR.
+  std::string getOriginalAccessRelationStr() const;
 
   /// @brief Get the base address of this access (e.g. A for A[i+j]).
   Value *getBaseAddr() const { return BaseAddr; }
@@ -265,9 +291,6 @@ public:
 
   /// @brief Return the access instruction of this memory access.
   Instruction *getAccessInstruction() const { return Inst; }
-
-  /// @brief Get the new access function imported from JSCOP file
-  isl_map *getNewAccessRelation() const;
 
   /// Get the stride of this memory access in the specified Schedule. Schedule
   /// is a map from the statement to a schedule where the innermost dimension is
