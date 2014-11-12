@@ -691,13 +691,13 @@ static bool regionWithoutLoops(Region &R, LoopInfo *LI) {
 // but do not recurse further if the first child has been found.
 //
 // Return the number of regions erased from Regs.
-static unsigned eraseAllChildren(std::set<const Region *> &Regs,
+static unsigned eraseAllChildren(ScopDetection::RegionSet &Regs,
                                  const Region &R) {
   unsigned Count = 0;
   for (auto &SubRegion : R) {
-    if (Regs.find(SubRegion.get()) != Regs.end()) {
+    if (Regs.count(SubRegion.get())) {
       ++Count;
-      Regs.erase(SubRegion.get());
+      Regs.remove(SubRegion.get());
     } else {
       Count += eraseAllChildren(Regs, *SubRegion);
     }
@@ -740,7 +740,7 @@ void ScopDetection::findScops(Region &R) {
 
     // Skip invalid regions. Regions may become invalid, if they are element of
     // an already expanded region.
-    if (ValidRegions.find(CurrentRegion) == ValidRegions.end())
+    if (!ValidRegions.count(CurrentRegion))
       continue;
 
     Region *ExpandedR = expandRegion(*CurrentRegion);
@@ -750,7 +750,7 @@ void ScopDetection::findScops(Region &R) {
 
     R.addSubRegion(ExpandedR, true);
     ValidRegions.insert(ExpandedR);
-    ValidRegions.erase(CurrentRegion);
+    ValidRegions.remove(CurrentRegion);
 
     // Erase all (direct and indirect) children of ExpandedR from the valid
     // regions and update the number of valid regions.
@@ -813,7 +813,7 @@ bool ScopDetection::isValidRegion(DetectionContext &Context) const {
   DEBUG(dbgs() << "Checking region: " << R.getNameStr() << "\n\t");
 
   if (R.isTopLevelRegion()) {
-    DEBUG(dbgs() << "Top level region is invalid"; dbgs() << "\n");
+    DEBUG(dbgs() << "Top level region is invalid\n");
     return false;
   }
 
@@ -877,9 +877,8 @@ void ScopDetection::printLocations(llvm::Function &F) {
   }
 }
 
-void
-ScopDetection::emitMissedRemarksForValidRegions(const Function &F,
-                                                const RegionSet &ValidRegions) {
+void ScopDetection::emitMissedRemarksForValidRegions(
+    const Function &F, const RegionSet &ValidRegions) {
   for (const Region *R : ValidRegions) {
     const Region *Parent = R->getParent();
     if (Parent && !Parent->isTopLevelRegion() && RejectLogs.count(Parent))

@@ -25,6 +25,7 @@
 #include "polly/LinkAllPasses.h"
 #include "polly/Options.h"
 #include "polly/ScopInfo.h"
+#include "polly/Support/GICHelper.h"
 #include "llvm/Support/Debug.h"
 
 #include "isl/union_map.h"
@@ -40,6 +41,11 @@ using namespace llvm;
 using namespace polly;
 
 using IslAstUserPayload = IslAstInfo::IslAstUserPayload;
+
+static cl::opt<bool>
+    PollyParallel("polly-parallel",
+                  cl::desc("Generate thread parallel code (isl codegen only)"),
+                  cl::init(false), cl::ZeroOrMore, cl::cat(PollyCategory));
 
 static cl::opt<bool> UseContext("polly-ast-use-context",
                                 cl::desc("Use context"), cl::Hidden,
@@ -147,6 +153,7 @@ static isl_printer *cbPrintFor(__isl_take isl_printer *Printer,
 
   isl_pw_aff *DD = IslAstInfo::getMinimalDependenceDistance(Node);
   const std::string BrokenReductionsStr = getBrokenReductionsStr(Node);
+  const std::string KnownParallelStr = "#pragma known-parallel";
   const std::string DepDisPragmaStr = "#pragma minimal dependence distance: ";
   const std::string SimdPragmaStr = "#pragma simd";
   const std::string OmpPragmaStr = "#pragma omp parallel for";
@@ -157,8 +164,10 @@ static isl_printer *cbPrintFor(__isl_take isl_printer *Printer,
   if (IslAstInfo::isInnermostParallel(Node))
     Printer = printLine(Printer, SimdPragmaStr + BrokenReductionsStr);
 
-  if (IslAstInfo::isOutermostParallel(Node))
-    Printer = printLine(Printer, OmpPragmaStr + BrokenReductionsStr);
+  if (IslAstInfo::isExecutedInParallel(Node))
+    Printer = printLine(Printer, OmpPragmaStr);
+  else if (IslAstInfo::isOutermostParallel(Node))
+    Printer = printLine(Printer, KnownParallelStr + BrokenReductionsStr);
 
   isl_pw_aff_free(DD);
   return isl_ast_node_for_print(Node, Printer, Options);
@@ -356,7 +365,8 @@ IslAst::IslAst(Scop *Scop, Dependences &D) : S(Scop) {
   isl_union_map *Schedule =
       isl_union_map_intersect_domain(S->getSchedule(), S->getDomains());
 
-  if (DetectParallel || PollyVectorizerChoice != VECTORIZER_NONE) {
+  if (PollyParallel || DetectParallel ||
+      PollyVectorizerChoice != VECTORIZER_NONE) {
     BuildInfo.Deps = &D;
     BuildInfo.InParallelFor = 0;
 
@@ -443,6 +453,11 @@ bool IslAstInfo::isReductionParallel(__isl_keep isl_ast_node *Node) {
   return Payload && Payload->IsReductionParallel;
 }
 
+bool IslAstInfo::isExecutedInParallel(__isl_keep isl_ast_node *Node) {
+  return PollyParallel && isOutermostParallel(Node) &&
+         !isReductionParallel(Node);
+}
+
 isl_union_map *IslAstInfo::getSchedule(__isl_keep isl_ast_node *Node) {
   IslAstUserPayload *Payload = getNodePayload(Node);
   return Payload ? isl_ast_build_get_schedule(Payload->Build) : nullptr;
@@ -491,7 +506,10 @@ void IslAstInfo::printScop(raw_ostream &OS) const {
 
   OS << ":: isl ast :: " << F->getName() << " :: " << S.getRegion().getNameStr()
      << "\n";
-  DEBUG(dbgs() << S.getContextStr() << "\n"; isl_union_map_dump(Schedule));
+  DEBUG({
+    dbgs() << S.getContextStr() << "\n";
+    dbgs() << stringFromIslObj(Schedule);
+  });
   OS << "\nif (" << RtCStr << ")\n\n";
   OS << AstStr << "\n";
   OS << "else\n";

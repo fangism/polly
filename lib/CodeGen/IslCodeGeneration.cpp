@@ -64,8 +64,6 @@ public:
 
   ~IslNodeBuilder() { delete Rewriter; }
 
-  /// @brief Add the mappings from array id's to array llvm::Value's.
-  void addMemoryAccesses(Scop &S);
   void addParameters(__isl_take isl_set *Context);
   void create(__isl_take isl_ast_node *Node);
   IslExprBuilder &getExprBuilder() { return ExprBuilder; }
@@ -87,6 +85,15 @@ private:
   // on, the only isl_ids that are stored here are the newly calculated loop
   // ivs.
   IslExprBuilder::IDToValueTy IDToValue;
+
+  /// Generate code for a given SCEV*
+  ///
+  /// This function generates code for a given SCEV expression. It generated
+  /// code is emmitted at the end of the basic block our Builder currently
+  /// points to and the resulting value is returned.
+  ///
+  /// @param Expr The expression to code generate.
+  Value *generateSCEV(const SCEV *Expr);
 
   // Extract the upper bound of this loop
   //
@@ -544,16 +551,9 @@ void IslNodeBuilder::addParameters(__isl_take isl_set *Context) {
 
   for (unsigned i = 0; i < isl_set_dim(Context, isl_dim_param); ++i) {
     isl_id *Id;
-    const SCEV *Scev;
-    IntegerType *T;
-    Instruction *InsertLocation;
 
     Id = isl_set_get_dim_id(Context, isl_dim_param, i);
-    Scev = (const SCEV *)isl_id_get_user(Id);
-    T = dyn_cast<IntegerType>(Scev->getType());
-    InsertLocation = --(Builder.GetInsertBlock()->end());
-    Value *V = Rewriter->expandCodeFor(Scev, T, InsertLocation);
-    IDToValue[Id] = V;
+    IDToValue[Id] = generateSCEV((const SCEV *)isl_id_get_user(Id));
 
     isl_id_free(Id);
   }
@@ -561,13 +561,10 @@ void IslNodeBuilder::addParameters(__isl_take isl_set *Context) {
   isl_set_free(Context);
 }
 
-void IslNodeBuilder::addMemoryAccesses(Scop &S) {
-  for (ScopStmt *Stmt : S)
-    for (MemoryAccess *MA : *Stmt) {
-      isl_id *Id = MA->getArrayId();
-      IDToValue[Id] = MA->getBaseAddr();
-      isl_id_free(Id);
-    }
+Value *IslNodeBuilder::generateSCEV(const SCEV *Expr) {
+  Instruction *InsertLocation = --(Builder.GetInsertBlock()->end());
+  return Rewriter->expandCodeFor(Expr, cast<IntegerType>(Expr->getType()),
+                                 InsertLocation);
 }
 
 namespace {
@@ -620,7 +617,6 @@ public:
     PollyIRBuilder Builder = createPollyIRBuilder(EnteringBB, Annotator);
 
     IslNodeBuilder NodeBuilder(Builder, Annotator, this, *LI, *SE, *DT);
-    NodeBuilder.addMemoryAccesses(S);
     NodeBuilder.addParameters(S.getContext());
 
     Value *RTC = buildRTC(Builder, NodeBuilder.getExprBuilder());

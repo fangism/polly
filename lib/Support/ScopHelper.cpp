@@ -66,6 +66,12 @@ Value *polly::getPointerOperand(Instruction &Inst) {
   return 0;
 }
 
+Type *polly::getAccessInstType(Instruction *AccInst) {
+  if (StoreInst *Store = dyn_cast<StoreInst>(AccInst))
+    return Store->getValueOperand()->getType();
+  return AccInst->getType();
+}
+
 bool polly::hasInvokeEdge(const PHINode *PN) {
   for (unsigned i = 0, e = PN->getNumIncomingValues(); i < e; ++i)
     if (InvokeInst *II = dyn_cast<InvokeInst>(PN->getIncomingValue(i)))
@@ -88,11 +94,8 @@ BasicBlock *polly::createSingleExitEdge(Region *R, Pass *P) {
 
 static void replaceScopAndRegionEntry(polly::Scop *S, BasicBlock *OldEntry,
                                       BasicBlock *NewEntry) {
-  for (polly::ScopStmt *Stmt : *S)
-    if (Stmt->getBasicBlock() == OldEntry) {
-      Stmt->setBasicBlock(NewEntry);
-      break;
-    }
+  if (polly::ScopStmt *Stmt = S->getStmtForBasicBlock(OldEntry))
+    Stmt->setBasicBlock(NewEntry);
 
   S->getRegion().replaceEntryRecursive(NewEntry);
 }

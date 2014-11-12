@@ -127,11 +127,7 @@ class TempScop {
   // The Region.
   Region &R;
 
-  // The max loop depth of this Scop
-  unsigned MaxLoopDepth;
-
   // Remember the bounds of loops, to help us build iteration domain of BBs.
-  const LoopBoundMapType &LoopBounds;
   const BBCondMapType &BBConds;
 
   // Access function of bbs.
@@ -139,10 +135,9 @@ class TempScop {
 
   friend class TempScopInfo;
 
-  explicit TempScop(Region &r, LoopBoundMapType &loopBounds,
-                    BBCondMapType &BBCmps, AccFuncMapType &accFuncMap)
-      : R(r), MaxLoopDepth(0), LoopBounds(loopBounds), BBConds(BBCmps),
-        AccFuncMap(accFuncMap) {}
+  explicit TempScop(Region &r, BBCondMapType &BBCmps,
+                    AccFuncMapType &accFuncMap)
+      : R(r), BBConds(BBCmps), AccFuncMap(accFuncMap) {}
 
 public:
   ~TempScop();
@@ -151,23 +146,6 @@ public:
   ///
   /// @return The maximum Region contained by this Scop.
   Region &getMaxRegion() const { return R; }
-
-  /// @brief Get the maximum loop depth of Region R.
-  ///
-  /// @return The maximum loop depth of Region R.
-  unsigned getMaxLoopDepth() const { return MaxLoopDepth; }
-
-  /// @brief Get the loop bounds of the given loop.
-  ///
-  /// @param L The loop to get the bounds.
-  ///
-  /// @return The bounds of the loop L in { Lower bound, Upper bound } form.
-  ///
-  const SCEV *getLoopBound(const Loop *L) const {
-    LoopBoundMapType::const_iterator at = LoopBounds.find(L);
-    assert(at != LoopBounds.end() && "Bound for loop not available!");
-    return at->second;
-  }
 
   /// @brief Get the condition from entry block of the Scop to a BasicBlock
   ///
@@ -238,9 +216,6 @@ class TempScopInfo : public FunctionPass {
   // Target data for element size computing.
   const DataLayout *TD;
 
-  // Remember the bounds of loops, to help us build iteration domain of BBs.
-  LoopBoundMapType LoopBounds;
-
   // And also Remember the constrains for BBs
   BBCondMapType BBConds;
 
@@ -296,8 +271,6 @@ class TempScopInfo : public FunctionPass {
   bool buildScalarDependences(Instruction *Inst, Region *R);
 
   void buildAccessFunctions(Region &RefRegion, BasicBlock &BB);
-
-  void buildLoopBounds(TempScop &Scop);
 
 public:
   static char ID;

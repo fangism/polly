@@ -444,7 +444,7 @@ class ScopStmt {
                                             TempScop &tempScop);
   __isl_give isl_set *buildDomain(TempScop &tempScop, const Region &CurRegion);
   void buildScattering(SmallVectorImpl<unsigned> &Scatter);
-  void buildAccesses(TempScop &tempScop, const Region &CurRegion);
+  void buildAccesses(TempScop &tempScop);
 
   /// @brief Detect and mark reductions in the ScopStmt
   void checkForReductions();
@@ -620,6 +620,9 @@ private:
 
   /// Isl context.
   isl_ctx *IslCtx;
+
+  /// @brief A map from basic blocks to SCoP statements.
+  DenseMap<BasicBlock *, ScopStmt *> StmtMap;
 
   /// Constraints on parameters.
   isl_set *Context;
@@ -800,6 +803,9 @@ public:
   /// @brief Get an isl string representing the assumed context.
   std::string getAssumedContextStr() const;
 
+  /// @brief Return the stmt for the given @p BB or nullptr if none.
+  ScopStmt *getStmtForBasicBlock(BasicBlock *BB) const;
+
   /// @name Statements Iterators
   ///
   /// These iterators iterate over all statements of this Scop.
@@ -822,8 +828,9 @@ public:
   //@}
 
   /// @brief Return the (possibly new) ScopArrayInfo object for @p Access.
-  const ScopArrayInfo *getOrCreateScopArrayInfo(const IRAccess &Access,
-                                                Instruction *AccessInst);
+  const ScopArrayInfo *
+  getOrCreateScopArrayInfo(Value *BasePtr, Type *AccessType,
+                           const SmallVector<const SCEV *, 4> &Sizes);
 
   /// @brief Return the cached ScopArrayInfo object for @p BasePtr.
   const ScopArrayInfo *getScopArrayInfo(Value *BasePtr);
