@@ -60,6 +60,9 @@ add_polly_library(Polly
 if (APPLE)
 # apparently, this is not wanted on linux
 target_link_libraries(Polly
+  LLVMAnalysis
+  LLVMCore
+  LLVMInstCombine
   LLVMSupport
   LLVMScalarOpts
   LLVMTransformUtils
