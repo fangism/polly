@@ -412,16 +412,6 @@ void ClastStmtCodeGen::codegen(const clast_assignment *A, ScopStmt *Stmt,
   if (VLTS)
     (*VLTS)[VectorDim][Stmt->getLoopForDimension(Dim)] = URHS;
   LoopToScev[Stmt->getLoopForDimension(Dim)] = URHS;
-
-  const PHINode *PN = Stmt->getInductionVariableForDimension(Dim);
-  if (PN) {
-    RHS = Builder.CreateTruncOrBitCast(RHS, PN->getType());
-
-    if (VectorVMap)
-      (*VectorVMap)[VectorDim][PN] = RHS;
-
-    ValueMap[PN] = RHS;
-  }
 }
 
 void ClastStmtCodeGen::codegenSubstitutions(const clast_stmt *Assignment,
@@ -762,7 +752,7 @@ void ClastStmtCodeGen::codegenForGPGPU(const clast_for *F) {
   BasicBlock::iterator AfterLoop = Builder.GetInsertPoint();
   Builder.SetInsertPoint(LoopBody);
 
-  BasicBlock *AfterBB = 0;
+  BasicBlock *AfterBB = nullptr;
   if (NonPLoopDepth) {
     Value *LowerBound, *UpperBound, *IV, *Stride;
     Type *IntPtrTy = getIntPtrTy();

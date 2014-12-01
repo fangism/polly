@@ -13,8 +13,6 @@ LOADABLE_MODULE = 1
 CPP.Flags += $(POLLY_INC)
 LD.Flags += $(POLLY_LD) $(POLLY_LIB)
 
-LIBS += $(POLLY_LD) $(POLLY_LIB)
-
 include $(LEVEL)/Makefile.config
 
 # Enable optional source files
@@ -61,7 +59,6 @@ SOURCES= Polly.cpp \
 	 Transform/CodePreparation.cpp \
 	 Transform/DeadCodeElimination.cpp \
 	 Transform/IndependentBlocks.cpp \
-	 Transform/IndVarSimplify.cpp \
 	 Transform/ScheduleOptimizer.cpp \
 	 ${GPGPU_FILES} \
 	 ${ISL_CODEGEN_FILES} \
@@ -73,3 +70,5 @@ SOURCES= Polly.cpp \
 # Include Makefile.common so we know what to do.
 #
 include $(LEVEL)/Makefile.common
+
+LIBS += $(POLLY_LD) $(POLLY_LIB)

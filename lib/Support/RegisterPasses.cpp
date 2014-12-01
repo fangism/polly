@@ -21,7 +21,6 @@
 
 #include "polly/RegisterPasses.h"
 #include "polly/Canonicalization.h"
-#include "polly/CodeGen/BlockGenerators.h"
 #include "polly/CodeGen/Cloog.h"
 #include "polly/CodeGen/CodeGeneration.h"
 #include "polly/Dependences.h"
@@ -66,12 +65,6 @@ static cl::opt<OptimizerChoice> Optimizer(
     cl::Hidden, cl::init(OPTIMIZER_ISL), cl::ZeroOrMore,
     cl::cat(PollyCategory));
 
-#ifdef CLOOG_FOUND
-enum CodeGenChoice DefaultCodeGen = CODEGEN_CLOOG;
-#else
-enum CodeGenChoice DefaultCodeGen = CODEGEN_ISL;
-#endif
-
 CodeGenChoice polly::PollyCodeGenChoice;
 static cl::opt<CodeGenChoice, true> XCodeGenerator(
     "polly-code-generator", cl::desc("Select the code generator"),
@@ -81,7 +74,7 @@ static cl::opt<CodeGenChoice, true> XCodeGenerator(
 #endif
         clEnumValN(CODEGEN_ISL, "isl", "isl code generator"),
         clEnumValN(CODEGEN_NONE, "none", "no code generation"), clEnumValEnd),
-    cl::Hidden, cl::location(PollyCodeGenChoice), cl::init(DefaultCodeGen),
+    cl::Hidden, cl::location(PollyCodeGenChoice), cl::init(CODEGEN_ISL),
     cl::ZeroOrMore, cl::cat(PollyCategory));
 
 VectorizerChoice polly::PollyVectorizerChoice;
@@ -163,7 +156,6 @@ void initializePollyPasses(PassRegistry &Registry) {
   initializeJSONImporterPass(Registry);
   initializeIslAstInfoPass(Registry);
   initializeIslScheduleOptimizerPass(Registry);
-  initializePollyIndVarSimplifyPass(Registry);
   initializePollyCanonicalizePass(Registry);
   initializeScopDetectionPass(Registry);
   initializeScopInfoPass(Registry);
@@ -201,7 +193,7 @@ void initializePollyPasses(PassRegistry &Registry) {
 /// code generator. For the moment, the CLooG code generator is enabled by
 /// default.
 static void registerPollyPasses(llvm::PassManagerBase &PM) {
-  registerCanonicalicationPasses(PM, SCEVCodegen);
+  registerCanonicalicationPasses(PM);
 
   PM.add(polly::createScopInfoPass());
 

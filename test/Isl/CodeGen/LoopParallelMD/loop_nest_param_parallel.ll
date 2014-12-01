@@ -8,7 +8,7 @@
 ; CHECK-DAG:  %polly.loop_cond[[CInner:[0-9]*]] = icmp sle i64 %polly.indvar{{[0-9]*}}, 510
 ; CHECK-DAG:  br i1 %polly.loop_cond[[CInner]], label %polly.loop_header{{[0-9]*}}, label %polly.loop_exit{{[0-9]*}}, !llvm.loop ![[IDInner:[0-9]*]]
 ;
-; CHECK-DAG: store i32 %p_tmp{{[0-9]*}}, i32* %p_arrayidx{{[0-9]*}}, {{[ ._!,a-zA-Z0-9]*}}, !llvm.mem.parallel_loop_access !4
+; CHECK-DAG: store i32 %{{[a-z_0-9]*}}, i32* %{{[a-z_0-9]*}}, {{[ ._!,a-zA-Z0-9]*}}, !llvm.mem.parallel_loop_access !4
 ;
 ; CHECK-DAG: ![[IDOuter]] = metadata !{metadata ![[IDOuter]]}
 ; CHECK-DAG: ![[IDInner]] = metadata !{metadata ![[IDInner]]}

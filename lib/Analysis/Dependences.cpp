@@ -1,4 +1,4 @@
-//===- Dependency.cpp - Calculate dependency information for a Scop.  -----===//
+//===- Dependences.cpp - Calculate dependency information for a Scop. -----===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -122,6 +122,9 @@ void Dependences::collectInfo(Scop &S, isl_union_map **Read,
     }
     *StmtSchedule = isl_union_map_add_map(*StmtSchedule, Stmt->getScattering());
   }
+
+  *StmtSchedule =
+      isl_union_map_intersect_params(*StmtSchedule, S.getAssumedContext());
 }
 
 /// @brief Fix all dimension of @p Zero to 0 and add it to @p user
@@ -452,7 +455,7 @@ bool Dependences::isValidScattering(StatementToIslMapTy *NewScattering) {
   isl_space *Space = S.getParamSpace();
   isl_union_map *Scattering = isl_union_map_empty(Space);
 
-  isl_space *ScatteringSpace = 0;
+  isl_space *ScatteringSpace = nullptr;
 
   for (ScopStmt *Stmt : S) {
     isl_map *StmtScat;
