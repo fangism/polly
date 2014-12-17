@@ -11,20 +11,20 @@
 ; SCOPES:      %[[AIdx:[._a-zA-Z0-9]*]] = getelementptr{{.*}} i32* %A, i64 %polly.indvar
 ; SCOPES:      store i32 %{{[._a-zA-Z0-9]*}}, i32* %[[AIdx]], align 4, !alias.scope ![[AliasScopeA:[0-9]*]], !noalias ![[NoAliasA:[0-9]*]]
 ;
-; SCOPES:      ![[AliasScopeB]] = metadata !{metadata ![[AliasScopeB]], metadata !{{[0-9]*}}, metadata !"polly.alias.scope.B"}
-; SCOPES:      ![[NoAliasB]] = metadata !{
-; SCOPES-DAG:     metadata ![[AliasScopeA]]
-; SCOPES-DAG:     metadata ![[AliasScopeC]]
+; SCOPES:      ![[AliasScopeB]] = !{![[AliasScopeB]], !{{[0-9]*}}, !"polly.alias.scope.B"}
+; SCOPES:      ![[NoAliasB]] = !{
+; SCOPES-DAG:     ![[AliasScopeA]]
+; SCOPES-DAG:     ![[AliasScopeC]]
 ; SCOPES:       }
-; SCOPES-DAG:  ![[AliasScopeA]] = metadata !{metadata ![[AliasScopeA]], metadata !{{[0-9]*}}, metadata !"polly.alias.scope.A"}
-; SCOPES-DAG:  ![[AliasScopeC]] = metadata !{metadata ![[AliasScopeC]], metadata !{{[0-9]*}}, metadata !"polly.alias.scope.C"}
-; SCOPES:      ![[NoAliasC]] = metadata !{
-; SCOPES-DAG:     metadata ![[AliasScopeA]]
-; SCOPES-DAG:     metadata ![[AliasScopeB]]
+; SCOPES-DAG:  ![[AliasScopeA]] = !{![[AliasScopeA]], !{{[0-9]*}}, !"polly.alias.scope.A"}
+; SCOPES-DAG:  ![[AliasScopeC]] = !{![[AliasScopeC]], !{{[0-9]*}}, !"polly.alias.scope.C"}
+; SCOPES:      ![[NoAliasC]] = !{
+; SCOPES-DAG:     ![[AliasScopeA]]
+; SCOPES-DAG:     ![[AliasScopeB]]
 ; SCOPES:       }
-; SCOPES:      ![[NoAliasA]] = metadata !{
-; SCOPES-DAG:     metadata ![[AliasScopeB]]
-; SCOPES-DAG:     metadata ![[AliasScopeC]]
+; SCOPES:      ![[NoAliasA]] = !{
+; SCOPES-DAG:     ![[AliasScopeB]]
+; SCOPES-DAG:     ![[AliasScopeC]]
 ; SCOPES:       }
 ;
 ; NOSCOPES:    %[[BIdx:[._a-zA-Z0-9]*]] = getelementptr{{.*}} i32* %B, i64 %polly.indvar
@@ -40,7 +40,7 @@
 ; NOSCOPES-NOT: alias.scope
 ; NOSCOPES-NOT: noalias
 ;
-; NOSCOPES-NOT: metadata
+; NOSCOPES-NOT: !
 ;
 ;    void jd(int *A, int *B, float *C) {
 ;      for (int i = 0; i < 1024; i++)
