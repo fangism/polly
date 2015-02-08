@@ -120,6 +120,11 @@ static cl::opt<bool>
                    cl::Hidden, cl::init(false), cl::ZeroOrMore,
                    cl::cat(PollyCategory));
 
+static cl::opt<bool> AllowUnsigned("polly-allow-unsigned",
+                                   cl::desc("Allow unsigned expressions"),
+                                   cl::Hidden, cl::init(false), cl::ZeroOrMore,
+                                   cl::cat(PollyCategory));
+
 static cl::opt<bool, true>
     TrackFailures("polly-detect-track-failures",
                   cl::desc("Track failure strings in detecting scop regions"),
@@ -292,7 +297,7 @@ bool ScopDetection::isValidCFG(BasicBlock &BB,
     //
     // TODO: This is not sufficient and just hides bugs. However it does pretty
     // well.
-    if (ICmp->isUnsigned())
+    if (ICmp->isUnsigned() && !AllowUnsigned)
       return false;
 
     // Are both operands of the ICmp affine?
@@ -457,8 +462,8 @@ bool ScopDetection::hasAffineMemoryAccesses(DetectionContext &Context) const {
       if (IsNonAffine) {
         BasePtrHasNonAffine = true;
         if (!AllowNonAffine)
-          invalid<ReportNonAffineAccess>(Context, /*Assert=*/true, AF, Insn,
-                                         BaseValue);
+          invalid<ReportNonAffineAccess>(Context, /*Assert=*/true, Pair.second,
+                                         Insn, BaseValue);
         if (!KeepGoing && !AllowNonAffine)
           return false;
       }

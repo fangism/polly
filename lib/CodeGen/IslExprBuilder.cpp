@@ -112,7 +112,7 @@ Value *IslExprBuilder::createAccessAddress(isl_ast_expr *Expr) {
   const ScopArrayInfo *SAI = ScopArrayInfo::getFromId(BaseId);
   Base = SAI->getBasePtr();
   assert(Base->getType()->isPointerTy() && "Access base should be a pointer");
-  const Twine &BaseName = Base->getName();
+  StringRef BaseName = Base->getName();
 
   if (Base->getType() != SAI->getType())
     Base = Builder.CreateBitCast(Base, SAI->getType(),
@@ -127,7 +127,8 @@ Value *IslExprBuilder::createAccessAddress(isl_ast_expr *Expr) {
     if (!IndexOp)
       IndexOp = NextIndex;
     else
-      IndexOp = Builder.CreateAdd(IndexOp, NextIndex);
+      IndexOp =
+          Builder.CreateAdd(IndexOp, NextIndex, "polly.access.add." + BaseName);
 
     // For every but the last dimension multiply the size, for the last
     // dimension we can exit the loop.
@@ -135,9 +136,17 @@ Value *IslExprBuilder::createAccessAddress(isl_ast_expr *Expr) {
       break;
 
     const SCEV *DimSCEV = SAI->getDimensionSize(u - 1);
-    Value *DimSize = Expander.expandCodeFor(DimSCEV, IndexOp->getType(),
+    Value *DimSize = Expander.expandCodeFor(DimSCEV, DimSCEV->getType(),
                                             Builder.GetInsertPoint());
-    IndexOp = Builder.CreateMul(IndexOp, DimSize);
+
+    Type *Ty = getWidestType(DimSize->getType(), IndexOp->getType());
+
+    if (Ty != IndexOp->getType())
+      IndexOp = Builder.CreateSExtOrTrunc(IndexOp, Ty,
+                                          "polly.access.sext." + BaseName);
+
+    IndexOp =
+        Builder.CreateMul(IndexOp, DimSize, "polly.access.mul." + BaseName);
   }
 
   Access = Builder.CreateGEP(Base, IndexOp, "polly.access." + BaseName);
@@ -280,13 +289,16 @@ Value *IslExprBuilder::createOpICmp(__isl_take isl_ast_expr *Expr) {
   LHS = create(isl_ast_expr_get_op_arg(Expr, 0));
   RHS = create(isl_ast_expr_get_op_arg(Expr, 1));
 
-  bool IsPtrType = LHS->getType()->isPointerTy();
-  assert((!IsPtrType || RHS->getType()->isPointerTy()) &&
-         "Both ICmp operators should be pointer types or none of them");
+  bool IsPtrType =
+      LHS->getType()->isPointerTy() || RHS->getType()->isPointerTy();
 
   if (LHS->getType() != RHS->getType()) {
     if (IsPtrType) {
       Type *I8PtrTy = Builder.getInt8PtrTy();
+      if (!LHS->getType()->isPointerTy())
+        LHS = Builder.CreateIntToPtr(LHS, I8PtrTy);
+      if (!RHS->getType()->isPointerTy())
+        RHS = Builder.CreateIntToPtr(RHS, I8PtrTy);
       if (LHS->getType() != I8PtrTy)
         LHS = Builder.CreateBitCast(LHS, I8PtrTy);
       if (RHS->getType() != I8PtrTy)

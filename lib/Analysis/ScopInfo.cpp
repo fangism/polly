@@ -767,10 +767,13 @@ __isl_give isl_set *ScopStmt::buildConditionSet(const Comparison &Comp) {
   case ICmpInst::ICMP_SGE:
     return isl_pw_aff_ge_set(L, R);
   case ICmpInst::ICMP_ULT:
+    return isl_pw_aff_lt_set(L, R);
   case ICmpInst::ICMP_UGT:
+    return isl_pw_aff_gt_set(L, R);
   case ICmpInst::ICMP_ULE:
+    return isl_pw_aff_le_set(L, R);
   case ICmpInst::ICMP_UGE:
-    llvm_unreachable("Unsigned comparisons not yet supported");
+    return isl_pw_aff_ge_set(L, R);
   default:
     llvm_unreachable("Non integer predicate not supported");
   }
@@ -1168,14 +1171,18 @@ void Scop::addParameterBounds() {
     isl_id *Id;
     const SCEV *Scev;
     const IntegerType *T;
+    int Width;
 
     Id = isl_set_get_dim_id(Context, isl_dim_param, i);
     Scev = (const SCEV *)isl_id_get_user(Id);
-    T = dyn_cast<IntegerType>(Scev->getType());
     isl_id_free(Id);
 
-    assert(T && "Not an integer type");
-    int Width = T->getBitWidth();
+    T = dyn_cast<IntegerType>(Scev->getType());
+
+    if (!T)
+      continue;
+
+    Width = T->getBitWidth();
 
     V = isl_val_int_from_si(IslCtx, Width - 1);
     V = isl_val_2exp(V);
@@ -1462,6 +1469,8 @@ static unsigned getMaxLoopDepthInRegion(const Region &R, LoopInfo &LI) {
   unsigned MinLD = INT_MAX, MaxLD = 0;
   for (BasicBlock *BB : R.blocks()) {
     if (Loop *L = LI.getLoopFor(BB)) {
+      if (!R.contains(L))
+        continue;
       unsigned LD = L->getLoopDepth();
       MinLD = std::min(MinLD, LD);
       MaxLD = std::max(MaxLD, LD);
@@ -1476,6 +1485,42 @@ static unsigned getMaxLoopDepthInRegion(const Region &R, LoopInfo &LI) {
   assert(MaxLD >= MinLD &&
          "Maximal loop depth was smaller than mininaml loop depth?");
   return MaxLD - MinLD + 1;
+}
+
+void Scop::dropConstantScheduleDims() {
+  isl_union_map *FullSchedule = getSchedule();
+
+  if (isl_union_map_n_map(FullSchedule) == 0) {
+    isl_union_map_free(FullSchedule);
+    return;
+  }
+
+  isl_set *ScheduleSpace =
+      isl_set_from_union_set(isl_union_map_range(FullSchedule));
+  isl_map *DropDimMap = isl_set_identity(isl_set_copy(ScheduleSpace));
+
+  int NumDimsDropped = 0;
+  for (unsigned i = 0; i < isl_set_dim(ScheduleSpace, isl_dim_set); i++)
+    if (i % 2 == 0) {
+      isl_val *FixedVal =
+          isl_set_plain_get_val_if_fixed(ScheduleSpace, isl_dim_set, i);
+      if (isl_val_is_int(FixedVal)) {
+        DropDimMap =
+            isl_map_project_out(DropDimMap, isl_dim_out, i - NumDimsDropped, 1);
+        NumDimsDropped++;
+      }
+      isl_val_free(FixedVal);
+    }
+
+  DropDimMap = isl_map_set_tuple_id(
+      DropDimMap, isl_dim_out, isl_map_get_tuple_id(DropDimMap, isl_dim_in));
+  for (auto *S : *this) {
+    isl_map *Schedule = S->getScattering();
+    Schedule = isl_map_apply_range(Schedule, isl_map_copy(DropDimMap));
+    S->setScattering(Schedule);
+  }
+  isl_set_free(ScheduleSpace);
+  isl_map_free(DropDimMap);
 }
 
 Scop::Scop(TempScop &tempScop, LoopInfo &LI, ScalarEvolution &ScalarEvolution,
@@ -1497,6 +1542,7 @@ Scop::Scop(TempScop &tempScop, LoopInfo &LI, ScalarEvolution &ScalarEvolution,
   realignParams();
   addParameterBounds();
   simplifyAssumedContext();
+  dropConstantScheduleDims();
 
   assert(NestLoops.empty() && "NestLoops not empty at top level!");
 }
@@ -1628,6 +1674,7 @@ void Scop::print(raw_ostream &OS) const {
   OS.indent(4) << "Function: " << getRegion().getEntry()->getParent()->getName()
                << "\n";
   OS.indent(4) << "Region: " << getNameStr() << "\n";
+  OS.indent(4) << "Max Loop Depth:  " << getMaxLoopDepth() << "\n";
   printContext(OS.indent(4));
   printAliasAssumptions(OS);
   printStatements(OS.indent(4));
