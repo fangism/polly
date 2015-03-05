@@ -49,17 +49,20 @@ add_polly_library(Polly
   ${POLLY_PLUTO_FILES}
   )
 
-if (APPLE)
-# apparently, this is not wanted on linux
-target_link_libraries(Polly
-  LLVMAnalysis
-  LLVMCore
-  LLVMInstCombine
-  LLVMSupport
-  LLVMScalarOpts
-  LLVMTransformUtils
-  LLVMipo
-)
+if (BUILD_SHARED_LIBS)
+  target_link_libraries(Polly
+    LLVMSupport
+    LLVMCore
+    LLVMScalarOpts
+    LLVMInstCombine
+    LLVMTransformUtils
+    LLVMAnalysis
+    LLVMipo
+    LLVMProfileData
+  )
+  link_directories(
+      ${LLVM_LIBRARY_DIR}
+  )
 endif()
 
 # Build a monolithic Polly.a and a thin module LLVMPolly.moduleext that links to
