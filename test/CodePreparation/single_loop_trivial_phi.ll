@@ -1,4 +1,4 @@
-; RUN: opt %loadPolly -S -polly-prepare < %s | FileCheck %s
+; RUN: opt %loadPolly -polly-detect-unprofitable -S -polly-prepare < %s | FileCheck %s
 ; ModuleID = 'single_loop_trivial_phi.ll'
 ;
 ; int f(int *A, int N) {
@@ -9,7 +9,6 @@
 ; }
 ; ModuleID = 'stack-slots.ll'
 target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
-target triple = "x86_64-unknown-linux-gnu"
 
 ; Function Attrs: nounwind uwtable
 define i32 @f(i32* %A, i32 %N) #0 {
@@ -24,8 +23,8 @@ for.inc.lr.ph:                                    ; preds = %entry
 for.inc:                                          ; preds = %for.inc.lr.ph, %for.inc
   %sum.03 = phi i32 [ 0, %for.inc.lr.ph ], [ %add, %for.inc ]
   %indvars.iv2 = phi i64 [ 0, %for.inc.lr.ph ], [ %indvars.iv.next, %for.inc ]
-  %arrayidx = getelementptr i32* %A, i64 %indvars.iv2
-  %tmp1 = load i32* %arrayidx, align 4
+  %arrayidx = getelementptr i32, i32* %A, i64 %indvars.iv2
+  %tmp1 = load i32, i32* %arrayidx, align 4
   %add = add nsw i32 %tmp1, %sum.03
   %indvars.iv.next = add nuw nsw i64 %indvars.iv2, 1
   %exitcond = icmp ne i64 %indvars.iv.next, %0

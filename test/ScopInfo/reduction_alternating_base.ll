@@ -1,9 +1,9 @@
-; RUN: opt %loadPolly -polly-scops -analyze < %s | FileCheck %s
+; RUN: opt %loadPolly -polly-detect-unprofitable -polly-scops -analyze < %s | FileCheck %s
 ;
 ; FIXME: We cannot detect this SCoP yet but as soon as we can we should check
 ;        that the reduction is detected!
 ;
-; CHECK-NOT: Scattering
+; CHECK-NOT: Schedule
 ;
 ;    void f(int *A) {
 ;      for (int i = 0; i < 1024; i++)
@@ -23,8 +23,8 @@ for.cond:                                         ; preds = %for.inc, %entry
 
 for.body:                                         ; preds = %for.cond
   %rem = srem i32 %i.0, 2
-  %arrayidx = getelementptr inbounds i32* %A, i32 %rem
-  %tmp = load i32* %arrayidx, align 4
+  %arrayidx = getelementptr inbounds i32, i32* %A, i32 %rem
+  %tmp = load i32, i32* %arrayidx, align 4
   %add = add nsw i32 %tmp, %i.0
   store i32 %add, i32* %arrayidx, align 4
   br label %for.inc

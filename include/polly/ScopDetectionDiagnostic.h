@@ -44,15 +44,6 @@ class Region;
 
 namespace polly {
 
-/// @brief Get the location of a region from the debug info.
-///
-/// @param R The region to get debug info for.
-/// @param LineBegin The first line in the region.
-/// @param LineEnd The last line in the region.
-/// @param FileName The filename where the region was defined.
-void getDebugLocation(const Region *R, unsigned &LineBegin, unsigned &LineEnd,
-                      std::string &FileName);
-
 class RejectLog;
 /// @brief Emit optimization remarks about the rejected regions to the user.
 ///
@@ -111,6 +102,7 @@ enum RejectReasonKind {
   rrkUnknownInst,
   rrkPHIinExit,
   rrkEntry,
+  rrkUnprofitable,
   rrkLastOther
 };
 
@@ -826,6 +818,28 @@ public:
   /// @name RejectReason interface
   //@{
   virtual std::string getMessage() const override;
+  virtual const DebugLoc &getDebugLoc() const override;
+  //@}
+};
+
+//===----------------------------------------------------------------------===//
+/// @brief Report regions that seem not profitable to be optimized.
+class ReportUnprofitable : public ReportOther {
+  //===--------------------------------------------------------------------===//
+  Region *R;
+
+public:
+  ReportUnprofitable(Region *R);
+
+  /// @name LLVM-RTTI interface
+  //@{
+  static bool classof(const RejectReason *RR);
+  //@}
+
+  /// @name RejectReason interface
+  //@{
+  virtual std::string getMessage() const override;
+  virtual std::string getEndUserMessage() const override;
   virtual const DebugLoc &getDebugLoc() const override;
   //@}
 };

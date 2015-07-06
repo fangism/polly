@@ -14,7 +14,9 @@
 #include "polly/CodeGen/Utils.h"
 #include "polly/CodeGen/IRBuilder.h"
 #include "polly/ScopInfo.h"
+
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/RegionInfo.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
@@ -26,11 +28,11 @@ BasicBlock *polly::executeScopConditionally(Scop &S, Pass *P, Value *RTC) {
   PollyIRBuilder Builder(R.getEntry());
   DominatorTree &DT = P->getAnalysis<DominatorTreeWrapperPass>().getDomTree();
   RegionInfo &RI = P->getAnalysis<RegionInfoPass>().getRegionInfo();
-  LoopInfo &LI = P->getAnalysis<LoopInfo>();
+  LoopInfo &LI = P->getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
 
   // Split the entry edge of the region and generate a new basic block on this
   // edge. This function also updates ScopInfo and RegionInfo.
-  NewBlock = SplitEdge(R.getEnteringBlock(), R.getEntry(), P);
+  NewBlock = SplitEdge(R.getEnteringBlock(), R.getEntry(), &DT, &LI);
   if (DT.dominates(R.getEntry(), NewBlock)) {
     BasicBlock *OldBlock = R.getEntry();
     std::string OldName = OldBlock->getName();
@@ -60,7 +62,7 @@ BasicBlock *polly::executeScopConditionally(Scop &S, Pass *P, Value *RTC) {
   Builder.SetInsertPoint(SplitBlock);
   Builder.CreateCondBr(RTC, StartBlock, R.getEntry());
   if (Loop *L = LI.getLoopFor(SplitBlock))
-    L->addBasicBlockToLoop(StartBlock, LI.getBase());
+    L->addBasicBlockToLoop(StartBlock, LI);
   DT.addNewBlock(StartBlock, SplitBlock);
   Builder.SetInsertPoint(StartBlock);
 
@@ -71,7 +73,7 @@ BasicBlock *polly::executeScopConditionally(Scop &S, Pass *P, Value *RTC) {
     // PHI nodes that would complicate life.
     MergeBlock = R.getExit();
   else {
-    MergeBlock = SplitEdge(R.getExitingBlock(), R.getExit(), P);
+    MergeBlock = SplitEdge(R.getExitingBlock(), R.getExit(), &DT, &LI);
     // SplitEdge will never split R.getExit(), as R.getExit() has more than
     // one predecessor. Hence, mergeBlock is always a newly generated block.
     R.replaceExitRecursive(MergeBlock);
