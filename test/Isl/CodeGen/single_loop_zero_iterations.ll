@@ -1,4 +1,4 @@
-; RUN: opt %loadPolly -polly-detect-unprofitable -polly-ast -analyze  -S < %s | FileCheck %s
+; RUN: opt %loadPolly -polly-detect-unprofitable -polly-ast -analyze -S < %s | FileCheck %s -check-prefix=SCALAR
 
 ;#define N 20
 ;
@@ -64,5 +64,5 @@ return:                                           ; preds = %if.else, %if.then
   ret i32 %retval.0
 }
 
-; CHECK: for region: 'for.cond => for.end.region' in function 'main':
-; CHECK-NOT:   Stmt_for_body(0);
+; SCALAR: for region: 'for.cond => for.end' in function 'main':
+; SCALAR-NOT:   Stmt_for_body(0);

@@ -13,40 +13,39 @@
 //===----------------------------------------------------------------------===//
 
 #include "polly/CodeGen/IslNodeBuilder.h"
-#include "polly/Config/config.h"
-#include "polly/CodeGen/IslExprBuilder.h"
 #include "polly/CodeGen/BlockGenerators.h"
 #include "polly/CodeGen/CodeGeneration.h"
 #include "polly/CodeGen/IslAst.h"
+#include "polly/CodeGen/IslExprBuilder.h"
 #include "polly/CodeGen/LoopGenerators.h"
 #include "polly/CodeGen/Utils.h"
+#include "polly/Config/config.h"
 #include "polly/DependenceInfo.h"
 #include "polly/LinkAllPasses.h"
 #include "polly/ScopInfo.h"
 #include "polly/Support/GICHelper.h"
-#include "polly/Support/ScopHelper.h"
 #include "polly/Support/SCEVValidator.h"
+#include "polly/Support/ScopHelper.h"
 #include "polly/TempScopInfo.h"
-
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/Analysis/ScalarEvolutionExpander.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/IR/Verifier.h"
-#include "llvm/IR/DataLayout.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
-
-#include "isl/union_map.h"
-#include "isl/list.h"
+#include "isl/aff.h"
 #include "isl/ast.h"
 #include "isl/ast_build.h"
-#include "isl/set.h"
+#include "isl/list.h"
 #include "isl/map.h"
-#include "isl/aff.h"
+#include "isl/set.h"
+#include "isl/union_map.h"
+#include "isl/union_set.h"
 
 using namespace polly;
 using namespace llvm;
@@ -106,6 +105,8 @@ IslNodeBuilder::getUpperBound(__isl_keep isl_ast_node *For,
 unsigned IslNodeBuilder::getNumberOfIterations(__isl_keep isl_ast_node *For) {
   isl_union_map *Schedule = IslAstInfo::getSchedule(For);
   isl_set *LoopDomain = isl_set_from_union_set(isl_union_map_range(Schedule));
+  if (isl_set_is_wrapping(LoopDomain))
+    LoopDomain = isl_map_range(isl_set_unwrap(LoopDomain));
   int Dim = isl_set_dim(LoopDomain, isl_dim_set);
 
   // Calculate a map similar to the identity map, but with the last input
@@ -184,7 +185,7 @@ static int findValuesInBlock(struct FindValuesUser &User, const ScopStmt *Stmt,
 /// This function extracts a ScopStmt from a given isl_set and computes the
 /// Values this statement depends on as well as a set of SCEV expressions that
 /// need to be synthesized when generating code for this statment.
-static int findValuesInStmt(isl_set *Set, void *UserPtr) {
+static isl_stat findValuesInStmt(isl_set *Set, void *UserPtr) {
   isl_id *Id = isl_set_get_tuple_id(Set);
   struct FindValuesUser &User = *static_cast<struct FindValuesUser *>(UserPtr);
   const ScopStmt *Stmt = static_cast<const ScopStmt *>(isl_id_get_user(Id));
@@ -200,7 +201,7 @@ static int findValuesInStmt(isl_set *Set, void *UserPtr) {
 
   isl_id_free(Id);
   isl_set_free(Set);
-  return 0;
+  return isl_stat_ok;
 }
 
 void IslNodeBuilder::getReferencesInSubtree(__isl_keep isl_ast_node *For,
@@ -232,8 +233,7 @@ void IslNodeBuilder::getReferencesInSubtree(__isl_keep isl_ast_node *For,
   /// are considered local. This leaves only loops that are before the scop, but
   /// do not contain the scop itself.
   Loops.remove_if([this](const Loop *L) {
-    return this->S.getRegion().contains(L) ||
-           L->contains(S.getRegion().getEntry());
+    return S.getRegion().contains(L) || L->contains(S.getRegion().getEntry());
   });
 }
 

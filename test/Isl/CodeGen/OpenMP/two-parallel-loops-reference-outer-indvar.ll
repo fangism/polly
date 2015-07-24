@@ -1,5 +1,5 @@
 ; RUN: opt %loadPolly -polly-detect-unprofitable -polly-parallel -polly-parallel-force -polly-ast -analyze < %s | FileCheck %s -check-prefix=AST
-; RUN: opt %loadPolly -polly-detect-unprofitable -polly-parallel -polly-parallel-force -polly-codegen-isl -S -verify-dom-info < %s | FileCheck %s -check-prefix=IR
+; RUN: opt %loadPolly -polly-detect-unprofitable -polly-parallel -polly-parallel-force -polly-codegen -S -verify-dom-info < %s | FileCheck %s -check-prefix=IR
 
 ; This test case verifies that we create correct code even if two OpenMP loops
 ; share common outer variables.
@@ -16,7 +16,7 @@
 ; AST:     Stmt_for_body35(c0);
 
 ; IR: @foo.polly.subfn
-; IR: @foo.polly.subfn1
+; IR: @foo.polly.subfn.1
 
 target datalayout = "e-m:e-i64:64-f80:128-n8:16:32:64-S128"
 

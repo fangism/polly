@@ -258,7 +258,7 @@ struct isl_insert_if_data {
 	isl_ast_build *build;
 };
 
-static int insert_if(__isl_take isl_basic_set *bset, void *user);
+static isl_stat insert_if(__isl_take isl_basic_set *bset, void *user);
 
 /* Insert an if node around "node" testing the condition encoded
  * in guard "guard".
@@ -304,7 +304,7 @@ static __isl_give isl_ast_node *ast_node_insert_if(
 /* Insert an if node around a copy of "data->node" testing the condition
  * encoded in guard "bset" and add the result to data->list.
  */
-static int insert_if(__isl_take isl_basic_set *bset, void *user)
+static isl_stat insert_if(__isl_take isl_basic_set *bset, void *user)
 {
 	struct isl_insert_if_data *data = user;
 	isl_ast_node *node;
@@ -315,7 +315,7 @@ static int insert_if(__isl_take isl_basic_set *bset, void *user)
 	node = ast_node_insert_if(node, set, data->build);
 	data->list = isl_ast_node_list_add(data->list, node);
 
-	return 0;
+	return isl_stat_ok;
 }
 
 /* Insert an if node around graft->node testing the condition encoded
@@ -719,7 +719,7 @@ static __isl_give isl_ast_node_list *extract_node_list(
 /* Look for shared enforced constraints by all the elements in "list"
  * on outer loops (with respect to the current depth) and return the result.
  *
- * We assume that the number of children is at least one.
+ * If there are no elements in "list", then return the empty set.
  */
 __isl_give isl_basic_set *isl_ast_graft_list_extract_shared_enforced(
 	__isl_keep isl_ast_graft_list *list,
@@ -733,16 +733,11 @@ __isl_give isl_basic_set *isl_ast_graft_list_extract_shared_enforced(
 	if (!list)
 		return NULL;
 
-	n = isl_ast_graft_list_n_ast_graft(list);
-	if (n == 0)
-		isl_die(isl_ast_graft_list_get_ctx(list), isl_error_invalid,
-			"for node should have at least one child",
-			return NULL);
-
 	space = isl_ast_build_get_space(build, 1);
 	enforced = isl_basic_set_empty(space);
 
 	depth = isl_ast_build_get_depth(build);
+	n = isl_ast_graft_list_n_ast_graft(list);
 	for (i = 0; i < n; ++i) {
 		isl_ast_graft *graft;
 

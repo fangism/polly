@@ -19,19 +19,17 @@
 //===----------------------------------------------------------------------===//
 #include "polly/ScopDetectionDiagnostic.h"
 #include "polly/Support/ScopLocation.h"
-
-#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AliasSetTracker.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/RegionInfo.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Value.h"
-#include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/Statistic.h"
-
-#include "llvm/Analysis/RegionInfo.h"
 
 #define DEBUG_TYPE "polly-detect"
 #include "llvm/Support/Debug.h"
@@ -207,6 +205,22 @@ std::string ReportInvalidCond::getMessage() const {
 
 bool ReportInvalidCond::classof(const RejectReason *RR) {
   return RR->getKind() == rrkInvalidCond;
+}
+
+//===----------------------------------------------------------------------===//
+// ReportUnsignedCond.
+
+std::string ReportUnsignedCond::getMessage() const {
+  return ("Condition in BB '" + BB->getName()).str() +
+         "' performs a comparision on (not yet supported) unsigned integers.";
+}
+
+std::string ReportUnsignedCond::getEndUserMessage() const {
+  return "Unsupported comparision on unsigned integers encountered";
+}
+
+bool ReportUnsignedCond::classof(const RejectReason *RR) {
+  return RR->getKind() == rrkUnsignedCond;
 }
 
 //===----------------------------------------------------------------------===//

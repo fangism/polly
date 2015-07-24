@@ -23,7 +23,7 @@
 ; INNERMOST:            Domain :=
 ; INNERMOST:                [p_0, p_1, p_2, p_3, p_4] -> { Stmt_bb16[i0] : (i0 <= 1023 - p_1 and i0 >= 0 and i0 <= 1024 + p_0) or (i0 >= 0 and i0 >= 1025 - p_1 and i0 <= 1024 + p_0) };
 ; INNERMOST:            Schedule :=
-; INNERMOST:                [p_0, p_1, p_2, p_3, p_4] -> { Stmt_bb16[i0] -> [i0] };
+; INNERMOST:                [p_0, p_1, p_2, p_3, p_4] -> { Stmt_bb16[i0] -> [i0] : i0 >= 1025 - p_1 or i0 <= 1023 - p_1 };
 ; INNERMOST:            ReadAccess := [Reduction Type: NONE] [Scalar: 0]
 ; INNERMOST:                [p_0, p_1, p_2, p_3, p_4] -> { Stmt_bb16[i0] -> MemRef_A[o0] : 4o0 = p_2 };
 ; INNERMOST:            ReadAccess := [Reduction Type: NONE] [Scalar: 0]
@@ -44,19 +44,19 @@
 ; ALL:    Alias Groups (0):
 ; ALL:        n/a
 ; ALL:    Statements {
-; ALL:      Stmt_(bb15 => bb25)
+; ALL:      Stmt_bb15__TO__bb25
 ; ALL:            Domain :=
-; ALL:                { Stmt_(bb15 => bb25)[i0, i1] : i0 >= 0 and i0 <= 1023 and i1 >= 0 and i1 <= 1023 };
+; ALL:                { Stmt_bb15__TO__bb25[i0, i1] : i0 >= 0 and i0 <= 1023 and i1 >= 0 and i1 <= 1023 };
 ; ALL:            Schedule :=
-; ALL:                { Stmt_(bb15 => bb25)[i0, i1] -> [i0, i1] };
+; ALL:                { Stmt_bb15__TO__bb25[i0, i1] -> [i0, i1] };
 ; ALL:            ReadAccess := [Reduction Type: NONE] [Scalar: 0]
-; ALL:                { Stmt_(bb15 => bb25)[i0, i1] -> MemRef_A[i0] };
+; ALL:                { Stmt_bb15__TO__bb25[i0, i1] -> MemRef_A[i0] };
 ; ALL:            ReadAccess := [Reduction Type: NONE] [Scalar: 0]
-; ALL:                { Stmt_(bb15 => bb25)[i0, i1] -> MemRef_A[i1] };
+; ALL:                { Stmt_bb15__TO__bb25[i0, i1] -> MemRef_A[i1] };
 ; ALL:            ReadAccess := [Reduction Type: NONE] [Scalar: 0]
-; ALL:                { Stmt_(bb15 => bb25)[i0, i1] -> MemRef_A[o0] : o0 <= 2305843009213693949 and o0 >= 0 };
+; ALL:                { Stmt_bb15__TO__bb25[i0, i1] -> MemRef_A[o0] : o0 <= 2305843009213693949 and o0 >= 0 };
 ; ALL:            MayWriteAccess := [Reduction Type: NONE] [Scalar: 0]
-; ALL:                { Stmt_(bb15 => bb25)[i0, i1] -> MemRef_A[o0] : o0 <= 2305843009213693949 and o0 >= 0 };
+; ALL:                { Stmt_bb15__TO__bb25[i0, i1] -> MemRef_A[o0] : o0 <= 2305843009213693949 and o0 >= 0 };
 ; ALL:    }
 ;
 ;    void f(int *A) {

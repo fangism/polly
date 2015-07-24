@@ -26,16 +26,14 @@
 #include "polly/Options.h"
 #include "polly/ScopInfo.h"
 #include "polly/Support/GICHelper.h"
-
 #include "llvm/Analysis/RegionInfo.h"
 #include "llvm/Support/Debug.h"
-
-#include "isl/union_map.h"
-#include "isl/list.h"
-#include "isl/ast_build.h"
-#include "isl/set.h"
-#include "isl/map.h"
 #include "isl/aff.h"
+#include "isl/ast_build.h"
+#include "isl/list.h"
+#include "isl/map.h"
+#include "isl/set.h"
+#include "isl/union_map.h"
 
 #define DEBUG_TYPE "polly-ast"
 
@@ -384,9 +382,6 @@ IslAst::IslAst(Scop *Scop, const Dependences &D)
 
   Build = isl_ast_build_set_at_each_domain(Build, AtEachDomain, nullptr);
 
-  isl_union_map *Schedule =
-      isl_union_map_intersect_domain(S->getSchedule(), S->getDomains());
-
   if (PerformParallelTest) {
     BuildInfo.Deps = &D;
     BuildInfo.InParallelFor = 0;
@@ -399,7 +394,7 @@ IslAst::IslAst(Scop *Scop, const Dependences &D)
 
   buildRunCondition(Build);
 
-  Root = isl_ast_build_ast_from_schedule(Build, Schedule);
+  Root = isl_ast_build_node_from_schedule(Build, S->getScheduleTree());
 
   isl_ast_build_free(Build);
 }
@@ -556,6 +551,9 @@ void IslAstInfo::printScop(raw_ostream &OS, Scop &S) const {
   OS << AstStr << "\n";
   OS << "else\n";
   OS << "    {  /* original code */ }\n\n";
+
+  free(RtCStr);
+  free(AstStr);
 
   isl_ast_expr_free(RunCondition);
   isl_union_map_free(Schedule);

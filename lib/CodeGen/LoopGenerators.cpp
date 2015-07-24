@@ -17,8 +17,8 @@
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Module.h"
-#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
 using namespace llvm;
 using namespace polly;
@@ -235,7 +235,7 @@ void ParallelLoopGenerator::createCallJoinThreads() {
     F = Function::Create(Ty, Linkage, Name, M);
   }
 
-  Builder.CreateCall(F);
+  Builder.CreateCall(F, {});
 }
 
 void ParallelLoopGenerator::createCallCleanupThread() {
@@ -251,7 +251,7 @@ void ParallelLoopGenerator::createCallCleanupThread() {
     F = Function::Create(Ty, Linkage, Name, M);
   }
 
-  Builder.CreateCall(F);
+  Builder.CreateCall(F, {});
 }
 
 Function *ParallelLoopGenerator::createSubFnDefinition() {

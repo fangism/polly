@@ -1,4 +1,4 @@
-; RUN: opt %loadPolly -polly-detect-unprofitable -basicaa -polly-detect -analyze  < %s | FileCheck %s
+; RUN: opt %loadPolly -polly-detect-unprofitable -basicaa -polly-detect -analyze  < %s | FileCheck %s -check-prefix=PHI
 
 ; void f(long A[], long N, long *init_ptr) {
 ;   long i, j;
@@ -47,4 +47,4 @@ return:
   ret void
 }
 
-; CHECK: Valid Region for Scop: for.j => for.i.end
+; PHI: Valid Region for Scop: for.i => return

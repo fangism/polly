@@ -1,31 +1,28 @@
-; RUN: opt %loadPolly -basicaa -polly-scops -polly-allow-nonaffine -polly-allow-nonaffine-branches -polly-allow-nonaffine-loops=true -analyze < %s | FileCheck %s
+; RUN: opt %loadPolly -basicaa -polly-scops -polly-allow-nonaffine -polly-allow-nonaffine-branches -polly-allow-nonaffine-loops=true -analyze < %s | FileCheck %s -check-prefix=SCALAR
 ;
-; CHECK:    Function: f
-; CHECK:    Region: %bb1---%bb13
-; CHECK:    Max Loop Depth:  1
-; CHECK:    Context:
-; CHECK:    {  :  }
-; CHECK:    Assumed Context:
-; CHECK:    {  :  }
-; CHECK:    Alias Groups (0):
-; CHECK:        n/a
-; CHECK:    Statements {
-; CHECK:      Stmt_(bb3 => bb11)
-; CHECK:            Domain :=
-; CHECK:                { Stmt_(bb3 => bb11)[i0] : i0 >= 0 and i0 <= 1023 };
-; CHECK:            Schedule :=
-; CHECK:                { Stmt_(bb3 => bb11)[i0] -> [i0] };
-; CHECK:            ReadAccess := [Reduction Type: NONE] [Scalar: 0]
-; CHECK:                { Stmt_(bb3 => bb11)[i0] -> MemRef_C[i0] };
-; CHECK:            MustWriteAccess :=  [Reduction Type: NONE] [Scalar: 0]
-; CHECK:                { Stmt_(bb3 => bb11)[i0] -> MemRef_tmp4_s2a[0] };
-; CHECK:            ReadAccess := [Reduction Type: NONE] [Scalar: 0]
-; CHECK:                { Stmt_(bb3 => bb11)[i0] -> MemRef_tmp4_s2a[0] };
-; CHECK:            ReadAccess := [Reduction Type: +] [Scalar: 0]
-; CHECK:                { Stmt_(bb3 => bb11)[i0] -> MemRef_A[o0] : o0 <= 2147483645 and o0 >= -2147483648 };
-; CHECK:            MayWriteAccess := [Reduction Type: +] [Scalar: 0]
-; CHECK:                { Stmt_(bb3 => bb11)[i0] -> MemRef_A[o0] : o0 <= 2147483645 and o0 >= -2147483648 };
-; CHECK:    }
+; SCALAR:    Function: f
+; SCALAR:    Region: %bb1---%bb13
+; SCALAR:    Max Loop Depth:  1
+; SCALAR:    Context:
+; SCALAR:    {  :  }
+; SCALAR:    Assumed Context:
+; SCALAR:    {  :  }
+; SCALAR:    Alias Groups (0):
+; SCALAR:        n/a
+; SCALAR:    Statements {
+; SCALAR:      Stmt_bb3__TO__bb11
+; SCALAR:            Domain :=
+; SCALAR:                { Stmt_bb3__TO__bb11[i0] : i0 >= 0 and i0 <= 1023 };
+; SCALAR:            Schedule :=
+; SCALAR:                { Stmt_bb3__TO__bb11[i0] -> [i0] };
+; SCALAR:            ReadAccess := [Reduction Type: NONE] [Scalar: 0]
+; SCALAR:                { Stmt_bb3__TO__bb11[i0] -> MemRef_C[i0] };
+; SCALAR:            ReadAccess := [Reduction Type: +] [Scalar: 0]
+; SCALAR:                { Stmt_bb3__TO__bb11[i0] -> MemRef_A[o0] : o0 <= 2147483645 and o0 >= -2147483648 };
+; SCALAR:            MayWriteAccess := [Reduction Type: +] [Scalar: 0]
+; SCALAR:                { Stmt_bb3__TO__bb11[i0] -> MemRef_A[o0] : o0 <= 2147483645 and o0 >= -2147483648 };
+; SCALAR:    }
+
 ;
 ;    void f(int * restrict A, int * restrict C) {
 ;      int j;

@@ -45,14 +45,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "polly/CodeGen/BlockGenerators.h"
+#include "polly/CodeGen/CodeGeneration.h"
 #include "polly/LinkAllPasses.h"
 #include "polly/Options.h"
-#include "polly/ScopDetectionDiagnostic.h"
 #include "polly/ScopDetection.h"
+#include "polly/ScopDetectionDiagnostic.h"
 #include "polly/Support/SCEVValidator.h"
 #include "polly/Support/ScopHelper.h"
 #include "polly/Support/ScopLocation.h"
-#include "polly/CodeGen/CodeGeneration.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/LoopInfo.h"
@@ -61,9 +61,9 @@
 #include "llvm/Analysis/ScalarEvolution.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/DebugInfo.h"
-#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/DiagnosticPrinter.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/Support/Debug.h"
 #include <set>
@@ -166,13 +166,6 @@ static cl::opt<bool>
                 cl::Hidden, cl::init(false), cl::ZeroOrMore,
                 cl::cat(PollyCategory));
 
-static cl::opt<bool, true> XPollyModelPHINodes(
-    "polly-model-phi-nodes",
-    cl::desc("Allow PHI nodes in the input [Unsafe with code-generation!]."),
-    cl::location(PollyModelPHINodes), cl::Hidden, cl::ZeroOrMore,
-    cl::init(false), cl::cat(PollyCategory));
-
-bool polly::PollyModelPHINodes = false;
 bool polly::PollyTrackFailures = false;
 bool polly::PollyDelinearize = false;
 StringRef polly::PollySkipFnAttr = "polly.skip.fn";
@@ -351,7 +344,7 @@ bool ScopDetection::isValidCFG(BasicBlock &BB,
     // TODO: This is not sufficient and just hides bugs. However it does pretty
     // well.
     if (ICmp->isUnsigned() && !AllowUnsigned)
-      return false;
+      return invalid<ReportUnsignedCond>(Context, /*Assert=*/true, Br, &BB);
 
     // Are both operands of the ICmp affine?
     if (isa<UndefValue>(ICmp->getOperand(0)) ||
@@ -452,7 +445,7 @@ bool ScopDetection::isInvariant(const Value &Val, const Region &Reg) const {
   // When the instruction is a load instruction, check that no write to memory
   // in the region aliases with the load.
   if (const LoadInst *LI = dyn_cast<LoadInst>(I)) {
-    AliasAnalysis::Location Loc = AA->getLocation(LI);
+    auto Loc = MemoryLocation::get(LI);
 
     // Check if any basic block in the region can modify the location pointed to
     // by 'Loc'.  If so, 'Val' is (likely) not invariant in the region.
@@ -471,17 +464,50 @@ bool ScopDetection::hasAffineMemoryAccesses(DetectionContext &Context) const {
 
   for (const SCEVUnknown *BasePointer : Context.NonAffineAccesses) {
     Value *BaseValue = BasePointer->getValue();
-    ArrayShape *Shape = new ArrayShape(BasePointer);
+    auto Shape = std::shared_ptr<ArrayShape>(new ArrayShape(BasePointer));
     bool BasePtrHasNonAffine = false;
 
     // First step: collect parametric terms in all array references.
     SmallVector<const SCEV *, 4> Terms;
     for (const auto &Pair : Context.Accesses[BasePointer]) {
-      const SCEVAddRecExpr *AccessFunction =
-          dyn_cast<SCEVAddRecExpr>(Pair.second);
+      if (auto *AF = dyn_cast<SCEVAddRecExpr>(Pair.second))
+        SE->collectParametricTerms(AF, Terms);
 
-      if (AccessFunction)
-        AccessFunction->collectParametricTerms(*SE, Terms);
+      // In case the outermost expression is a plain add, we check if any of its
+      // terms has the form 4 * %inst * %param * %param ..., aka a term that
+      // contains a product between a parameter and an instruction that is
+      // inside the scop. Such instructions, if allowed at all, are instructions
+      // SCEV can not represent, but Polly is still looking through. As a
+      // result, these instructions can depend on induction variables and are
+      // most likely no array sizes. However, terms that are multiplied with
+      // them are likely candidates for array sizes.
+      if (auto *AF = dyn_cast<SCEVAddExpr>(Pair.second)) {
+        for (auto Op : AF->operands()) {
+          if (auto *AF2 = dyn_cast<SCEVAddRecExpr>(Op))
+            SE->collectParametricTerms(AF2, Terms);
+          if (auto *AF2 = dyn_cast<SCEVMulExpr>(Op)) {
+            SmallVector<const SCEV *, 0> Operands;
+            bool TermsHasInRegionInst = false;
+
+            for (auto *MulOp : AF2->operands()) {
+              if (auto *Const = dyn_cast<SCEVConstant>(MulOp))
+                Operands.push_back(Const);
+              if (auto *Unknown = dyn_cast<SCEVUnknown>(MulOp)) {
+                if (auto *Inst = dyn_cast<Instruction>(Unknown->getValue())) {
+                  if (!Context.CurRegion.contains(Inst))
+                    Operands.push_back(MulOp);
+                  else
+                    TermsHasInRegionInst = true;
+
+                } else {
+                  Operands.push_back(MulOp);
+                }
+              }
+            }
+            Terms.push_back(SE->getMulExpr(Operands));
+          }
+        }
+      }
     }
 
     // Second step: find array shape.
@@ -525,10 +551,10 @@ bool ScopDetection::hasAffineMemoryAccesses(DetectionContext &Context) const {
     MapInsnToMemAcc TempMemoryAccesses;
     for (const auto &Pair : Context.Accesses[BasePointer]) {
       const Instruction *Insn = Pair.first;
-      const SCEVAddRecExpr *AF = dyn_cast<SCEVAddRecExpr>(Pair.second);
+      auto *AF = Pair.second;
       bool IsNonAffine = false;
-      MemAcc *Acc = new MemAcc(Insn, Shape);
-      TempMemoryAccesses.insert({Insn, Acc});
+      TempMemoryAccesses.insert(std::make_pair(Insn, MemAcc(Insn, Shape)));
+      MemAcc *Acc = &TempMemoryAccesses.find(Insn)->second;
 
       if (!AF) {
         if (isAffineExpr(&CurRegion, Pair.second, *SE, BaseValue))
@@ -536,7 +562,7 @@ bool ScopDetection::hasAffineMemoryAccesses(DetectionContext &Context) const {
         else
           IsNonAffine = true;
       } else {
-        AF->computeAccessFunctions(*SE, Acc->DelinearizedSubscripts,
+        SE->computeAccessFunctions(AF, Acc->DelinearizedSubscripts,
                                    Shape->DelinearizedSizes);
         if (Acc->DelinearizedSubscripts.size() == 0)
           IsNonAffine = true;
@@ -634,7 +660,7 @@ bool ScopDetection::isValidMemoryAccess(Instruction &Inst,
   AAMDNodes AATags;
   Inst.getAAMetadata(AATags);
   AliasSet &AS = Context.AST.getAliasSetForPointer(
-      BaseValue, AliasAnalysis::UnknownSize, AATags);
+      BaseValue, MemoryLocation::UnknownSize, AATags);
 
   // INVALID triggers an assertion in verifying mode, if it detects that a
   // SCoP was detected by SCoP detection and that this SCoP was invalidated by
@@ -669,11 +695,6 @@ bool ScopDetection::isValidMemoryAccess(Instruction &Inst,
 
 bool ScopDetection::isValidInstruction(Instruction &Inst,
                                        DetectionContext &Context) const {
-  if (PHINode *PN = dyn_cast<PHINode>(&Inst))
-    if (!PollyModelPHINodes && !canSynthesize(PN, LI, SE, &Context.CurRegion)) {
-      return invalid<ReportPhiNodeRefInRegion>(Context, /*Assert=*/true, &Inst);
-    }
-
   // We only check the call instruction but not invoke instruction.
   if (CallInst *CI = dyn_cast<CallInst>(&Inst)) {
     if (isValidCallInst(*CI))
@@ -720,15 +741,15 @@ bool ScopDetection::isValidLoop(Loop *L, DetectionContext &Context) const {
 
 Region *ScopDetection::expandRegion(Region &R) {
   // Initial no valid region was found (greater than R)
-  Region *LastValidRegion = nullptr;
-  Region *ExpandedRegion = R.getExpandedRegion();
+  std::unique_ptr<Region> LastValidRegion;
+  auto ExpandedRegion = std::unique_ptr<Region>(R.getExpandedRegion());
 
   DEBUG(dbgs() << "\tExpanding " << R.getNameStr() << "\n");
 
   while (ExpandedRegion) {
     DetectionContext Context(
-        *ExpandedRegion, *AA, NonAffineSubRegionMap[ExpandedRegion],
-        BoxedLoopsMap[ExpandedRegion], false /* verifying */);
+        *ExpandedRegion, *AA, NonAffineSubRegionMap[ExpandedRegion.get()],
+        BoxedLoopsMap[ExpandedRegion.get()], false /* verifying */);
     DEBUG(dbgs() << "\t\tTrying " << ExpandedRegion->getNameStr() << "\n");
     // Only expand when we did not collect errors.
 
@@ -740,28 +761,18 @@ Region *ScopDetection::expandRegion(Region &R) {
       if (!allBlocksValid(Context) || Context.Log.hasErrors())
         break;
 
-      if (Context.Log.hasErrors())
-        break;
-
-      // Delete unnecessary regions (allocated by getExpandedRegion)
-      if (LastValidRegion)
-        delete LastValidRegion;
-
       // Store this region, because it is the greatest valid (encountered so
       // far).
-      LastValidRegion = ExpandedRegion;
+      LastValidRegion = std::move(ExpandedRegion);
 
       // Create and test the next greater region (if any)
-      ExpandedRegion = ExpandedRegion->getExpandedRegion();
+      ExpandedRegion =
+          std::unique_ptr<Region>(LastValidRegion->getExpandedRegion());
 
     } else {
       // Create and test the next greater region (if any)
-      Region *TmpRegion = ExpandedRegion->getExpandedRegion();
-
-      // Delete unnecessary regions (allocated by getExpandedRegion)
-      delete ExpandedRegion;
-
-      ExpandedRegion = TmpRegion;
+      ExpandedRegion =
+          std::unique_ptr<Region>(ExpandedRegion->getExpandedRegion());
     }
   }
 
@@ -772,7 +783,7 @@ Region *ScopDetection::expandRegion(Region &R) {
       dbgs() << "\tExpanding " << R.getNameStr() << " failed\n";
   });
 
-  return LastValidRegion;
+  return LastValidRegion.release();
 }
 static bool regionWithoutLoops(Region &R, LoopInfo *LI) {
   for (const BasicBlock *BB : R.blocks())
